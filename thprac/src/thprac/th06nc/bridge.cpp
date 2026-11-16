@@ -37,7 +37,11 @@ std::wstring payloadDir() {
         if(a) CopyFileW((dir+L"freetype.dll").c_str(),(dir+L"libfreetype.dll").c_str(),FALSE);
         bool b=writeResource(IDR_MODULE_DLL,dir+L"thprac_th06nc.dll");
         log(std::wstring(L"extract: ")+(a?L"ok":L"fail")+L","+(b?L"ok":L"fail")+L" -> "+dir);
-    } else {dir=directory(executablePath())+L"\\"; log(L"no embedded resources, using "+dir);}
+    } else {dir=directory(executablePath())+L"\\"; log(L"no embedded resources, using "+dir);
+      std::wstring ftSrc=dir+L"freetype.dll";
+      if(GetFileAttributesW(ftSrc.c_str())!=INVALID_FILE_ATTRIBUTES)
+        CopyFileW(ftSrc.c_str(),(dir+L"libfreetype.dll").c_str(),FALSE);
+    }
     return dir;
 }
 const wchar_t* localized(int language,const wchar_t* zh,const wchar_t* en,const wchar_t* ja) {

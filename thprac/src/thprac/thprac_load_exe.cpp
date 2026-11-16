@@ -2,9 +2,11 @@
 
 #include "thprac_load_exe.h"
 #include "thprac_identify.h"
+#include "thprac_attach_log.h"
 #include "thprac_log.h"
 #include "thprac_gui_locale.h"
 #include "thprac_native.h"
+#include "thprac_wine_attach.h"
 #include "thprac_utils.h"
 #include "utils/utils.h"
 #include "utils/wininternal.h"
@@ -190,14 +192,19 @@ bool CheckTHPracSig(HANDLE hProc, uintptr_t base) {
 }
 
 
+static char g_checkFail[256];
+
 const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* pOutBase, HANDLE* pOutHandle) {
+    g_checkFail[0] = 0;
     if (pOutBase) *pOutBase = 0;
     if (pOutHandle) *pOutHandle = nullptr;
     auto hProc = OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
         FALSE, pid);
-    if (!hProc)
+    if (!hProc) {
+        snprintf(g_checkFail, sizeof(g_checkFail), "OpenProcess failed (error %lu)", GetLastError());
         return nullptr;
+    }
 
     defer({
         if (pOutHandle) {
@@ -214,13 +221,20 @@ const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* pOutBase, HANDL
         // Identify the on-disk image; the x64 bridge checks its full SHA-256 again.
         wchar_t path[32768];
         DWORD length = DWORD(std::size(path));
-        if (!QueryFullProcessImageNameW(hProc, 0, path, &length)) return nullptr;
-        const auto* version = IdentifyExe(path, nullptr);
+        if (!QueryFullProcessImageNameW(hProc, 0, path, &length)) {
+            snprintf(g_checkFail, sizeof(g_checkFail), "x64 target: QueryFullProcessImageNameW failed (error %lu)", GetLastError());
+            return nullptr;
+        }
+        ExeInfo info = {};
+        const auto* version = IdentifyExe(path, &info);
+        snprintf(g_checkFail, sizeof(g_checkFail), "x64 target: image=%s timestamp=%u textSize=%u identified=%d",
+            utf16_to_utf8(path).c_str(), (unsigned)info.timeStamp, (unsigned)info.textSize, version ? (int)version->gameId : -1);
         return version && version->gameId == ID_TH06NC ? version : nullptr;
     }
 
     uintptr_t base = GetProcessModuleBase(hProc);
     if (!base) {
+        snprintf(g_checkFail, sizeof(g_checkFail), "cannot read the image base (error %lu)", GetLastError());
         return nullptr;
     }
     if (pOutBase) {
@@ -230,6 +244,7 @@ const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* pOutBase, HANDL
     // Check THPrac signature
     // If an error happens here, return early
     if (CheckTHPracSig(hProc, base)) {
+        snprintf(g_checkFail, sizeof(g_checkFail), "thprac signature already present");
         return nullptr;
     }
 
@@ -241,6 +256,8 @@ const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* pOutBase, HANDL
     }
     return nullptr;
 }
+
+const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* pOutBase, HANDLE* pOutHandle);
 
 const wchar_t* allMutexNames[] = {
     L"Touhou Koumakyou App",
@@ -299,13 +316,18 @@ bool LoadSelf(HANDLE hProcess) {
 	return !rResult;
 }
 
+
 bool ApplyToProcById(DWORD pid) {
     uintptr_t base = 0;
     HANDLE hProc = nullptr;
     auto* sig = THPrac::CheckOngoingGameByPID(pid, &base, &hProc);
     defer(if (hProc) CloseHandle(hProc));
     if (sig) {
-        if (sig->gameId == ID_TH06NC) return LaunchTH06NC(true, pid);
+        if (sig->gameId == ID_TH06NC) {
+            bool ncOk = LaunchTH06NC(true, pid);
+            AttachLog("ApplyToProcById nc pid=%lu ok=%d", (unsigned long)pid, ncOk ? 1 : 0);
+            return ncOk;
+        }
         if (!WriteTHPracSig(hProc, base) || !LoadSelf(hProc)) {
             //fprintf(stderr, "Error: failed to inject into PID %d\n", pid);
             return false;
@@ -319,6 +341,7 @@ bool ApplyToProcById(DWORD pid) {
 }
 
 bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gameID) {
+    AttachLog("FindAndAttach(no=%d yes=%d game=%d)", prompt_if_no_game?1:0, prompt_if_yes_game?1:0, (int)gameID);
     bool hasPrompted = false;
     auto TryProcess = [&](SYSTEM_PROCESS_INFORMATION* proc, THGameID requiredGameID) -> bool {
         uintptr_t base;
@@ -326,21 +349,28 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
         const THGameVersion* gameSig = CheckOngoingGameByPID(proc->UniqueProcessId, &base, &hProc);
         defer(if (hProc) CloseHandle(hProc));
 
+        if (!gameSig && requiredGameID != ID_UNKNOWN) {
+            AttachLog("pid=%lu not identified: %s", (unsigned long)proc->UniqueProcessId, g_checkFail);
+        }
+
         if (!gameSig || (!gameSig->initFunc && gameSig->gameId != ID_TH06NC) ||
             (requiredGameID != ID_UNKNOWN && gameSig->gameId != requiredGameID)) {
             return false;
         }
+        AttachLog("found pid=%lu game=%d nc=%d prompt=%d", (unsigned long)proc->UniqueProcessId, (int)gameSig->gameId, gameSig->gameId == ID_TH06NC, prompt_if_yes_game ? 1 : 0);
         if (prompt_if_yes_game) {
             hasPrompted = true;
             const char* title = gameSig->gameId == ID_TH06NC ? S(TH06NC_TITLE) : gThGameStrs[gameSig->gameId];
             int choice = log_mboxf(0, MB_YESNO, S(THPRAC_PR_APPLY), S(THPRAC_PR_ASK_ATTACH), title);
             if (choice != IDYES) {
+                AttachLog("pid=%lu user declined", (unsigned long)proc->UniqueProcessId);
                 return false;
             }
         }
         const bool applied = gameSig->gameId == ID_TH06NC
             ? LaunchTH06NC(true, proc->UniqueProcessId)
             : WriteTHPracSig(hProc, base) && LoadSelf(hProc);
+        AttachLog("pid=%lu applied=%d", (unsigned long)proc->UniqueProcessId, applied ? 1 : 0);
         if (applied) {
             if (prompt_if_yes_game) {
                 hasPrompted = true;
@@ -372,6 +402,9 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
              proc = proc->NextEntryOffset ? (SYSTEM_PROCESS_INFORMATION*)((uintptr_t)proc + proc->NextEntryOffset) : nullptr
         ) {
             THGameID exeGameId = ParseExeName(UNICODE_STRING_PARAM(proc->ImageName));
+            if (exeGameId != ID_UNKNOWN) {
+                AttachLog("candidate pid=%lu id=%d", (unsigned long)proc->UniqueProcessId, (int)exeGameId);
+            }
 
             if (gameID == ID_UNKNOWN ? exeGameId == ID_UNKNOWN : exeGameId != gameID) {
                 continue;
@@ -398,7 +431,19 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
     }
 
 no_game:
+    // Games in other Wine prefixes (other Proton instances, plain Wine, Lutris,
+    // Bottles) are invisible to this wineserver; hand them to the Unix-side helper.
+    if (WineAttach::IsWine()) {
+        bool wineAsked = false;
+        if (WineAttach::AttachOtherPrefixes(gameID, prompt_if_no_game, prompt_if_yes_game, &wineAsked)) {
+            return true;
+        }
+        if (wineAsked) {
+            hasPrompted = true;
+        }
+    }
     if (prompt_if_no_game && !hasPrompted) {
+        AttachLog("no game found/handled");
         log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_NO_GAME));
     }
 

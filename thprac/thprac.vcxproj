@@ -116,6 +116,7 @@
     <ClCompile Include="src\thprac\thprac_update.cpp" />
     <ClCompile Include="src\thprac\thprac_utils.cpp" />
     <ClCompile Include="src\thprac\thprac_version.cpp" />
+    <ClCompile Include="src\thprac\thprac_wine_attach.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\3rdParties\ImGui\imgui_user.inl" />

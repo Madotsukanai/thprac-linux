@@ -60,3 +60,4 @@ thprac/src/thprac/thprac_th20.cpp
 thprac/src/thprac/thprac_update.cpp
 thprac/src/thprac/thprac_utils.cpp
 thprac/src/thprac/thprac_version.cpp
+thprac/src/thprac/thprac_wine_attach.cpp

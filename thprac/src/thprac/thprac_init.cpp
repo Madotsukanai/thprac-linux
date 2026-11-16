@@ -262,8 +262,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
     }
 
     if (curCmdId == CMD_ATTACH) {
-        FindAndAttach(false, false);
-        return 0;
+        // Exit code tells the cross-prefix helper (thprac_wine_attach.cpp) whether a game was handled.
+        return FindAndAttach(false, false) ? 0 : 1;
     }
     else if (!gSettings.dont_search_ongoing_game && FindAndAttach(false, true)) {
         return 0;

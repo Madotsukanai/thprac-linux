@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- On Linux, apply thprac to games running in other Wine prefixes (other Proton instances, plain Wine, Lutris, Bottles). The launcher scans `/proc` through Wine's Unix interop and re-runs itself with `--attach` inside the target prefix using the target's Wine build and environment. Hooked into the existing paths: startup auto-attach, Tools > apply to running game, and `--attach` without a PID.
+- Targets in another mount namespace (Steam's pressure-vessel container) are only handled through `nsenter`, never by starting a second wineserver on the same prefix.
+- `--attach` without a PID now exits with a non-zero code when no game was handled.
+
 ## 1.1.1 — 2026-09-27
 
 - Support Steam th06nc build 25306795 with a separate address layout while retaining original 1.03 support.

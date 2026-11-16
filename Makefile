@@ -53,12 +53,12 @@ $(TOOLCHAIN): | $(BUILD_DIR)
 	'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)' \
 	'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' > $@
 
-$(STAMP_NC): $(TOOLCHAIN) $(BUILD_DIR)/.locale CMakeLists.txt
+.PHONY: nc
+nc: $(TOOLCHAIN) $(BUILD_DIR)/.locale CMakeLists.txt
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) -DCMAKE_BUILD_TYPE=Release
 	cmake --build $(BUILD_DIR) --target thprac_th06nc thprac_bridge64 -j$(NPROC)
-	touch $@
 
-$(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE): $(STAMP_NC)
+$(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE): nc
 	@:
 
 $(DIST_DIR):
@@ -112,7 +112,7 @@ $(FT32_LIB): $(TOOLCHAIN32) | $(LAUNCHER_BUILD)
 
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) README_NC.md LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) README_NC.md LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
 	cp $(BIN_FT) $(LAUNCHER_BUILD)/payload/freetype.dll

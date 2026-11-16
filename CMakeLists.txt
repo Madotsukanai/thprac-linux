@@ -40,7 +40,7 @@ if(MSVC)
   target_compile_options(thprac_bridge64 PRIVATE /utf-8 /EHsc)
 else()
   target_compile_options(thprac_bridge64 PRIVATE -municode -finput-charset=UTF-8 -fexec-charset=UTF-8)
-  target_link_options(thprac_bridge64 PRIVATE -municode -static-libgcc -static-libstdc++)
+  target_link_options(thprac_bridge64 PRIVATE -municode -static -static-libgcc -static-libstdc++)
 endif()
 target_link_libraries(thprac_bridge64 PRIVATE bcrypt shell32 user32)
 add_custom_command(TARGET thprac_th06nc POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
