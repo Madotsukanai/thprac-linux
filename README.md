@@ -31,24 +31,6 @@ make        # = make all
 make clean  # build/ 以下を削除
 ```
 
-### ビルドの流れ
-
-1. Wine で `loc_json.exe` を実行し、ロケール定義(`thprac_locale_def.cpp/.h`)を生成
-2. CMake で 64bit モジュール(`thprac_th06nc`)とブリッジ(`thprac_bridge64`)をビルド
-3. FreeType 2.13.3 のソースを `build/linux-x86/freetype/` に取得し、32bit 静的ライブラリとしてビルド
-4. 32bit ランチャーを静的リンクでビルドし、上記のモジュール類をリソースとして埋め込む
-5. 生成した exe が `libstdc++` / `libwinpthread` / `libgcc_s` の DLL に依存していないかを検査
-
-### Make の変数
-
-```sh
-make FT_VERSION=2.13.3 FT_URL=https://.../freetype-2.13.3.tar.xz
-make MINGW32_CXX=i686-w64-mingw32-g++ WINE=wine
-```
-
-主な変数: `MINGW32_CXX` / `MINGW32_CC` / `MINGW64_CXX` / `MINGW64_CC` / `WINDRES32` / `WINDRES64` / `OBJDUMP32` / `WINE` / `PYTHON` / `BUILD_DIR` / `FT_VERSION` / `FT_URL`
-
-初回ビルドでは FreeType のダウンロードにネットワーク接続が必要です。`build/linux-x86/freetype/freetype-<バージョン>.tar.xz` に tarball を置いておけばダウンロードは省略されます。
 
 ## 使い方
 
