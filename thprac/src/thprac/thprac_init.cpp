@@ -269,34 +269,73 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
         return 0;
     }
 
-    // I already need all of this to have it's own scope.
-    if (gSettings.existing_game_launch_action != LAUNCH_ACTION_OPEN_LAUNCHER)
-        for (int originalNamePass = 1; originalNamePass >= 0; originalNamePass--)
-    {
-        WIN32_FIND_DATAW find = {};
-        HANDLE hFind = FindFirstFileW(L"*.exe", &find);
-        if (!hFind) {
-            return false;
+    // Look for a known game executable in the same directory as thprac.exe
+    // (and, failing that, in the directory thprac was started from).
+    // If one is found, it is launched with thprac hooked into it automatically.
+    if (gSettings.existing_game_launch_action != LAUNCH_ACTION_OPEN_LAUNCHER) {
+        std::wstring searchDirs[2];
+        {
+            // The current directory was set to thprac's own directory above.
+            wchar_t cur[MAX_PATH + 1] = {};
+            GetCurrentDirectoryW(MAX_PATH, cur);
+            searchDirs[0] = cur;
         }
-        do {
-            THGameID idFromExeName = ParseExeName(COUNTED(find.cFileName));
+        searchDirs[1] = old_working_dir;
 
-            // fucked up ternary
-            if (originalNamePass ? idFromExeName == ID_UNKNOWN : idFromExeName != ID_UNKNOWN) {
+        const wchar_t* selfPath = CurrentPeb()->ProcessParameters->ImagePathName.Buffer;
+        const size_t selfPathLen = CurrentPeb()->ProcessParameters->ImagePathName.Length / sizeof(wchar_t);
+
+        bool openLauncher = false;
+        for (int dirIdx = 0; dirIdx < 2 && !openLauncher; dirIdx++) {
+            std::wstring& dir = searchDirs[dirIdx];
+            while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) {
+                dir.pop_back();
+            }
+            if (dir.empty()) {
+                continue;
+            }
+            if (dirIdx == 1 && PathsCompare(searchDirs[0].c_str(), searchDirs[0].size(), dir.c_str(), dir.size())) {
                 continue;
             }
 
-            switch (TryRunGame(find.cFileName, nullptr, flags, gSettings.existing_game_launch_action == LAUNCH_ACTION_ALWAYS_ASK, false)) {
-            case RUN_GAME_SUCCESS:
-                return 0;
-            case RUN_GAME_LAUNCHER:
-                goto breakout;
-            default:
-                break;
+            for (int originalNamePass = 1; originalNamePass >= 0 && !openLauncher; originalNamePass--) {
+                WIN32_FIND_DATAW find = {};
+                std::wstring pattern = dir + L"\\*.exe";
+                HANDLE hFind = FindFirstFileW(pattern.c_str(), &find);
+                if (hFind == INVALID_HANDLE_VALUE) {
+                    break;
+                }
+                do {
+                    if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        continue;
+                    }
+
+                    THGameID idFromExeName = ParseExeName(COUNTED(find.cFileName));
+
+                    // fucked up ternary
+                    if (originalNamePass ? idFromExeName == ID_UNKNOWN : idFromExeName != ID_UNKNOWN) {
+                        continue;
+                    }
+
+                    // Always pass the full path so the game gets its own directory as the working directory.
+                    std::wstring fullPath = dir + L"\\" + find.cFileName;
+                    if (PathsCompare(fullPath.c_str(), fullPath.size(), selfPath, selfPathLen)) {
+                        continue;
+                    }
+
+                    const RUN_GAME_STATUS status = TryRunGame(fullPath.c_str(), nullptr, flags, gSettings.existing_game_launch_action == LAUNCH_ACTION_ALWAYS_ASK, false);
+                    if (status == RUN_GAME_SUCCESS) {
+                        FindClose(hFind);
+                        return 0;
+                    }
+                    if (status == RUN_GAME_LAUNCHER) {
+                        openLauncher = true;
+                        break;
+                    }
+                } while (FindNextFileW(hFind, &find));
+                FindClose(hFind);
             }
-        } while (FindNextFileW(hFind, &find));
-    breakout:
-        FindClose(hFind);
+        }
     }
 
     return Launcher(hInstance, nCmdShow);

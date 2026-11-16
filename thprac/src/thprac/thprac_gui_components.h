@@ -1,11 +1,20 @@
 #pragma once
+#if defined(_MSC_VER)
+#define TH_FORCEINLINE __forceinline
+#else
+#define TH_FORCEINLINE inline __attribute__((always_inline))
+#endif
 #include <imgui.h>
 #include <vector>
 #include <functional>
 #include <initializer_list>
 #include <utility>
+#ifndef NOMINMAX
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <Windows.h>
+#endif
+#endif
+#include <windows.h>
 
 #include "thprac_gui_impl_win32.h"
 #include "thprac_gui_input.h"
@@ -821,14 +830,14 @@ namespace Gui {
     int MultiButtonsRight_Impl(double x, ...);
     template<typename... Args>
     requires (std::is_same_v<Args, const char*> && ...)
-    __forceinline int MultiButtonsRight(double x, Args... args) {
+    TH_FORCEINLINE int MultiButtonsRight(double x, Args... args) {
         return MultiButtonsRight_Impl(x, args..., nullptr);
     }
 
     int MultiButtonsFillWindow_Impl(double height, ...);
     template<typename... Args>
     requires (std::is_same_v<Args, const char*> && ...)
-    __forceinline int MultiButtonsFillWindow(double height, Args... args) {
+    TH_FORCEINLINE int MultiButtonsFillWindow(double height, Args... args) {
         return MultiButtonsFillWindow_Impl(height, args..., nullptr);
     }
 
@@ -843,7 +852,7 @@ namespace Gui {
 #define EHOOK_HK(addr_, inslen_, ...) HookCtx { .data = PatchData() }
 #else
 #define PATCH_HK(addr_, code_) { .addr = addr_, .data = PatchCode(code_) }
-#define EHOOK_HK(addr_, inslen_, ...) { .addr = addr_, .callback = [](PCONTEXT pCtx, [[maybe_unused]] HookCtx * self) __VA_ARGS__, .data = PatchHookImpl(inslen_) }
+#define EHOOK_HK(addr_, inslen_, ...) { .addr = addr_, .callback = (THPrac::Callback)(+[](PCONTEXT pCtx, [[maybe_unused]] HookCtx * self) __VA_ARGS__), .data = PatchHookImpl(inslen_) }
 #endif
 
 #define HOTKEY_ENDDEF() >()}

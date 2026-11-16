@@ -1,4 +1,9 @@
 #pragma once
+#if defined(_MSC_VER)
+#define TH_FORCEINLINE __forceinline
+#else
+#define TH_FORCEINLINE inline __attribute__((always_inline))
+#endif
 #include "thprac_locale_def.h"
 #include "thprac_cfg.h"
 
@@ -8,13 +13,13 @@ namespace Gui {
 
     void LocaleSet(Locale locale);
     void LocaleSetFromSysLang();
-    __forceinline Locale LocaleGet() {
+    TH_FORCEINLINE Locale LocaleGet() {
         return __glocale_current;
     }
-    __forceinline const char** LocaleGetCurrentGlossary() {
+    TH_FORCEINLINE const char** LocaleGetCurrentGlossary() {
         return th_glossary_str[LocaleGet()];
     };
-    __forceinline const char* LocaleGetStr(th_glossary_t name) {
+    TH_FORCEINLINE const char* LocaleGetStr(th_glossary_t name) {
         return LocaleGetCurrentGlossary()[name];
     };
 
@@ -30,7 +35,7 @@ namespace Gui {
 
 }
 
-__forceinline const char* S(th_glossary_t name)
+TH_FORCEINLINE const char* S(th_glossary_t name)
 {
     return Gui::LocaleGetStr(name);
 }

@@ -2,7 +2,8 @@
 #include "practice_param.h"
 #include "addresses.h"
 #include "sections.h"
-#include <Windows.h>
+#include "common.h"
+#include <windows.h>
 namespace THPrac::TH06NC {
 extern uintptr_t imageBase;
 extern THPracParam thPracParam;

@@ -9,7 +9,7 @@ namespace Alcostg {
     };
 
     static __forceinline void call_0x413ef0(uint16_t beer) {
-#ifndef __clang__
+#ifdef _MSC_VER
     __asm {
         mov eax, 0x48e580;
         mov cx, beer;

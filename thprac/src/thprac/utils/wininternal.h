@@ -7,8 +7,10 @@
 #define write_fs_word(offset, data) __writefsword(offset, data)
 #define write_fs_dword(offset, data) __writefsdword(offset, data)
 #include "utils.h"
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <Windows.h>
+#endif
+#include <windows.h>
 
 typedef LONG NTSTATUS;
 typedef LONG KPRIORITY, *PKPRIORITY;

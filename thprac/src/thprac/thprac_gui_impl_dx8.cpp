@@ -18,7 +18,7 @@
 #include "thprac_gui_impl_dx8.h"
 #include "thprac_hook.h"
 #include <imgui.h>
-#include "..\3rdParties\d3d8\include\d3d8.h"
+#include "../3rdParties/d3d8/include/d3d8.h"
 
 
 namespace THPrac

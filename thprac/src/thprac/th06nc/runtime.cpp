@@ -4,6 +4,7 @@
 #include "presentation.h"
 #include "thprac_locale_def.h"
 #include <cstring>
+#include <cstdio>
 #include <atomic>
 
 namespace THPrac::TH06NC { uintptr_t imageBase{}; }
@@ -382,7 +383,7 @@ int64_t enemy(void* p) {
           hash=hash*1099511628211ULL^uint64_t(field<int>(p,off+0x234));
           hash=hash*1099511628211ULL^uint64_t(field<int>(p,off+4));
           hash=hash*1099511628211ULL^uint64_t(field<int16_t>(p,off+0x80));}}
-        char line[256];auto length=sprintf_s(line,"%u,%llu,%u,%u,%d,%d,%d,%llu\n",tick,hash,mem<uint16_t>(Rva::RandomSeed),mem<uint32_t>(Rva::RandomCount),mem<int8_t>(Rva::Lives),mem<int8_t>(Rva::Bombs),mem<int32_t>(Rva::StageGraze),mem<uint64_t>(Rva::Score));
+        char line[256];auto length=snprintf(line, sizeof(line),"%u,%llu,%u,%u,%d,%d,%d,%llu\n",tick,hash,mem<uint16_t>(Rva::RandomSeed),mem<uint32_t>(Rva::RandomCount),mem<int8_t>(Rva::Lives),mem<int8_t>(Rva::Bombs),mem<int32_t>(Rva::StageGraze),mem<uint64_t>(Rva::Score));
         DWORD written;WriteFile(trace,line,DWORD(length),&written,nullptr);
       }}
     ++simulationTick;return result;
@@ -443,8 +444,19 @@ int64_t menu(void* p) {
     }
     return originalMenu(p);
 }
+
+void rlog(const char* msg) {
+    FILE* f=fopen("thprac-th06nc.log","ab");
+    if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}
+}
+void rlogw(const char* msg, unsigned v) {
+    FILE* f=fopen("thprac-th06nc.log","ab");
+    if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}
+}
+
 DWORD WINAPI start(void*) {
     wchar_t diagnostic[8];diagnostics=GetEnvironmentVariableW(L"TH06NC_PRACTICE_TRACE",diagnostic,8)>0;
+    rlog("start");
     imageBase=base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if(HANDLE options=OpenFileMappingW(FILE_MAP_READ,FALSE,launchName(GetCurrentProcessId()).c_str())) {
         if(auto view=static_cast<const LaunchOptions*>(MapViewOfFile(options,FILE_MAP_READ,0,0,sizeof(LaunchOptions)))) {
@@ -456,18 +468,26 @@ DWORD WINAPI start(void*) {
         CloseHandle(options);
     }
     language.store(launchOptions.language);
-    mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mapName(GetCurrentProcessId()).c_str());
-    if(!mapping)return 1;
-    shared=static_cast<Shared*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(Shared)));
-    mutex=CreateMutexW(nullptr,FALSE,mutexName(GetCurrentProcessId()).c_str());
-    if(!shared||!mutex)return 2;
-    new(shared) Shared();
+    rlog("creating mapping");
+    auto mn=mapName(GetCurrentProcessId());
+    {int nn=WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,nullptr,0,nullptr,nullptr); std::string u(nn>1?nn-1:0,'\0'); if(nn>1)WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,u.data(),nn,nullptr,nullptr); FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] map name: ",f);fputs(u.c_str(),f);fputs("\n",f);fclose(f);}}
+    mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mn.c_str());
+    rlogw("map created err=",GetLastError());
+    if(!mapping){rlogw("mapfail err=",GetLastError());return 1;}
+    shared=static_cast<Shared*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(Shared))); rlog(shared?"view ok":"view fail");
+    mutex=CreateMutexW(nullptr,FALSE,mutexName(GetCurrentProcessId()).c_str()); rlog(mutex?"mutex ok":"mutex fail");
+    if(!shared||!mutex){rlogw("shared/mutex fail err=",GetLastError());return 2;}
+    new(shared) Shared(); rlog("shared init");
     shared->language=launchOptions.language;
     shared->practiceEnabled=launchOptions.practice;
-    auto build=identifyBuild(executablePath());
+    rlog("before build id");
+    auto build=(launchOptions.build>=1&&launchOptions.build<=2)?(GameBuild)launchOptions.build:identifyBuild(executablePath());
+    rlog(build==GameBuild::Unsupported?"build unsupported":build==GameBuild::Steam25306795?"build steam":"build original");
     if(build==GameBuild::Unsupported) {status.error=1;message(L"游戏版本不匹配：当前 EXE 尚未适配");sync();return 3;}
     if(build==GameBuild::Steam25306795)Rva::UseSteam25306795();
-    if(MH_Initialize()!=MH_OK) {status.error=2;message(L"初始化钩子失败");sync();return 4;}
+    rlog("mh init"); 
+    if(MH_Initialize()!=MH_OK) {status.error=2;message(L"初始化钩子失败");sync();rlog("mh init fail");return 4;}
+    rlog("mh init ok");
     struct Hook {uintptr_t rva;void* target;void** original;};
     Hook hooks[]={{Rva::GameInit,(void*)init,(void**)&originalInit},{Rva::GameUpdate,(void*)update,(void**)&originalUpdate},
       {Rva::PlayerUpdate,(void*)player,(void**)&originalPlayer},{Rva::EnemyUpdate,(void*)enemy,(void**)&originalEnemy},
@@ -476,19 +496,25 @@ DWORD WINAPI start(void*) {
       {Rva::PlayBgm,(void*)playBgm,(void**)&originalBgm},
       {Rva::ResultInit,(void*)resultInit,(void**)&originalResultInit},
       {Rva::WriteFile,(void*)writeFile,(void**)&originalWrite},{Rva::SupervisorUpdate,(void*)supervisor,(void**)&originalSupervisor}};
-    if(launchOptions.practice)for(auto& h:hooks)if(MH_CreateHook((void*)(base+h.rva),h.target,h.original)!=MH_OK){
-        MH_Uninitialize();status.error=3;message(L"创建钩子失败，未应用补丁");sync();return 5;}
-    if(launchOptions.lowLatency && MH_CreateHook((void*)(base+Rva::CalcChain),(void*)calc,(void**)&originalCalc)!=MH_OK){
-        MH_Uninitialize();status.error=3;message(L"创建显示钩子失败，未应用补丁");sync();return 5;}
-    if(!InstallOverlay(launchOptions.lowLatency!=0)){MH_Uninitialize();status.error=6;message(L"Direct3D 11 界面挂钩初始化失败。");sync();return 7;}
-    if(MH_EnableHook(MH_ALL_HOOKS)!=MH_OK){MH_Uninitialize();status.error=4;message(L"启用钩子失败");sync();return 6;}
-    status.ready=1;
+    if(launchOptions.practice){ rlog("create hooks");
+      for(auto& h:hooks)if(MH_CreateHook((void*)(base+h.rva),h.target,h.original)!=MH_OK){
+        MH_Uninitialize();status.error=3;message(L"创建钩子失败，未应用补丁");sync();rlog("create hook fail");return 5;}
+      rlog("hooks created");
+    }
+    rlog("enable hooks");
+    if(MH_EnableHook(MH_ALL_HOOKS)!=MH_OK){MH_Uninitialize();status.error=4;message(L"启用钩子失败");sync();rlog("enable fail");return 6;}
+    rlog("hooks enabled");
+    status.ready=1; rlog("ready");
     message(launchOptions.practice?L"已连接。从 Practice Start 选择单面后设置练习参数。":L"已连接，仅应用低延迟显示。");
-    sync();return 0;
+    sync();
+    rlog("install overlay");
+    HANDLE ot=CreateThread(nullptr,0,[](void* p)->DWORD{InstallOverlay(*(bool*)p);return 0;},new bool(launchOptions.lowLatency!=0),0,nullptr);
+    if(ot)CloseHandle(ot); else rlog("overlay thread fail");
+    return 0;
 }
 }
 BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID) {
-    if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(instance);HANDLE t=CreateThread(nullptr,0,start,nullptr,0,nullptr);if(t)CloseHandle(t);}
+    if(reason==DLL_PROCESS_ATTACH){DisableThreadLibraryCalls(instance);rlog("dll attach");HANDLE t=CreateThread(nullptr,0,start,nullptr,0,nullptr);if(t)CloseHandle(t);}
     return TRUE;
 }
 

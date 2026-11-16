@@ -19,7 +19,7 @@
 
     public:
 
-        __declspec(noinline) void State(int state)
+        TH_NOINLINE void State(int state)
         {
             switch (state) {
             case 0:
@@ -228,11 +228,11 @@
                 mChapter.SetBound(1, chapterCounts[0] + chapterCounts[1]);
 
                 if (chapterCounts[1] == 0) {
-                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_N), *mChapter);
+                    snprintf(chapterStr, sizeof(chapterStr), S(TH_STAGE_PORTION_N), *mChapter);
                 } else if (*mChapter <= chapterCounts[0]) {
-                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_1), *mChapter);
+                    snprintf(chapterStr, sizeof(chapterStr), S(TH_STAGE_PORTION_1), *mChapter);
                 } else {
-                    sprintf_s(chapterStr, S(TH_STAGE_PORTION_2), *mChapter - chapterCounts[0]);
+                    snprintf(chapterStr, sizeof(chapterStr), S(TH_STAGE_PORTION_2), *mChapter - chapterCounts[0]);
                 };
 
                 mChapter(chapterStr);

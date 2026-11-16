@@ -4,6 +4,10 @@
 #include <metrohash128.h>
 #include "../3rdParties/d3d8/include/d3d8.h"
 
+#include <basetsd.h>
+#ifndef SHANDLE_PTR
+typedef LONG_PTR SHANDLE_PTR;
+#endif
 #include <shlobj.h>
 
 

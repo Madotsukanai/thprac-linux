@@ -649,10 +649,10 @@ namespace TH13 {
         SINGLETON(THAdvOptWnd);
 
     public:
+        static void __stdcall VPResetFPSCallback(int32_t fps) { THAdvOptWnd::singleton().VPResetFPS(fps); }
         void FpsUpd()
         {
-            auto res = FPSHelper(mOptCtx, THGuiRep::singleton().mRepStatus, false, true,
-                [](int32_t fps) { THAdvOptWnd::singleton().VPResetFPS(fps); });
+            auto res = FPSHelper(mOptCtx, THGuiRep::singleton().mRepStatus, false, true, &VPResetFPSCallback);
             if (res) {
 
             }

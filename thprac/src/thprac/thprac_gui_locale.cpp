@@ -4,7 +4,7 @@
 #include <cstdlib>
 
 #define NOMINMAX
-#include <Windows.h>
+#include <windows.h>
 
 namespace THPrac {
 namespace Gui {

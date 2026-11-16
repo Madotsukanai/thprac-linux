@@ -29,7 +29,7 @@ namespace TH10 {
     // edi: Sound ID
     // Stack: one 0 value, callee stack cleanup.
 
-#if !defined(__clang__)
+#if defined(_MSC_VER)
     static __forceinline void play_sound_centered(uint32_t sound) {
         __asm {
             mov ecx, SOUND_MANAGER_ADDR

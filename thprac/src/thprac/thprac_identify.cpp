@@ -1,4 +1,4 @@
-#include <Windows.h>
+#include <windows.h>
 
 #include "thprac_identify.h"
 #include "thprac_utils.h"
@@ -1023,7 +1023,7 @@ THGameID ParseExeName(const wchar_t* name, size_t name_len) {
            name[4] < L'0' || name[4] > L'9') {
             return ID_UNKNOWN;
         }
-        size_t game_num = (name[4] - L'0') * 100 + (name[3] - L'0') * 10 + (name[4] - L'0');
+        size_t game_num = (name[2] - L'0') * 100 + (name[3] - L'0') * 10 + (name[4] - L'0');
 
         switch (game_num) {
             case  75: return ID_TH075;
@@ -1043,7 +1043,11 @@ THGameID ParseExeName(const wchar_t* name, size_t name_len) {
         }
     }
 
+    #ifdef _MSC_VER
     __assume(0);
+#else
+    __builtin_unreachable();
+#endif
 }
 
 }

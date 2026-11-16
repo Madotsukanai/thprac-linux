@@ -1,4 +1,5 @@
 #include "thprac_version.h"
+#include <cstddef>
 
 namespace THPrac {
 ThpracVersion ParseVersion(const char* str) {

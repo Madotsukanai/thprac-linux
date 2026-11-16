@@ -8,6 +8,7 @@
 #include "MinHook.h"
 #include <d3d11.h>
 #include <memory>
+#include <cstdio>
 
 namespace THPrac {
 constinit THPracSettings gSettings{};
@@ -272,39 +273,80 @@ bool PracticeIsOpen() { return wanted || opened; }
 int TakePracticeAction() { int result = action; action = 0; return result; }
 void ToggleQuickMenu(){if(PracticeActive()&&!NumericInputActive())quickWanted=!quickWanted;}
 void ToggleAdvancedMenu(){if(PracticeActive())advancedWanted=!advancedWanted;}
+using CreateDeviceFn = HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
+    const D3D_FEATURE_LEVEL*, UINT, UINT, const DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**,
+    ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+CreateDeviceFn originalCreateDevice{};
+bool overlayLowLatency{};
+bool overlayInstalled{};
+void TryInstallPresentHook(IDXGISwapChain* swap) {
+    if (overlayInstalled || !swap) return;
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    auto entry = (*reinterpret_cast<void***>(swap))[8];
+    MH_STATUS st=MH_CreateHook(entry, reinterpret_cast<void*>(Present), reinterpret_cast<void**>(&originalPresent));
+    if (st == MH_OK) {
+        if (overlayLowLatency) InstallLowLatency((*reinterpret_cast<void***>(swap))[13]);
+        MH_EnableHook(entry);
+        overlayInstalled = true;
+        rlogLocal("overlay: present hooked");
+    } else { char buf[64]; snprintf(buf,sizeof(buf),"overlay: present hook fail %d",st); rlogLocal(buf); }
+}
+HRESULT WINAPI HookedCreateDevice(IDXGIAdapter* a, D3D_DRIVER_TYPE b, HMODULE c, UINT d,
+    const D3D_FEATURE_LEVEL* e, UINT f, UINT g, const DXGI_SWAP_CHAIN_DESC* h, IDXGISwapChain** pSwap,
+    ID3D11Device** i, D3D_FEATURE_LEVEL* j, ID3D11DeviceContext** k) {
+    HRESULT hr = originalCreateDevice(a,b,c,d,e,f,g,h,pSwap,i,j,k);
+    if (SUCCEEDED(hr) && pSwap && *pSwap) TryInstallPresentHook(*pSwap);
+    return hr;
+}
+// The game may have created its device before the creation hook went in (injection
+// races with the game's own startup), or may use D3D11CreateDevice plus
+// IDXGIFactory::CreateSwapChain. Present is one function shared by every swap chain
+// of the DXGI implementation, so hooking it through a throwaway swap chain also
+// covers the game's own.
+bool InstallPresentHookFromDummy() {
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    rlogLocal("overlay: fallback dummy swap chain");
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc=DefWindowProcW; wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"ThpracNcDummyWindow";
+    RegisterClassExW(&wc);
+    HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"",WS_OVERLAPPED,0,0,64,64,nullptr,nullptr,wc.hInstance,nullptr);
+    if(!hwnd){rlogLocal("overlay: dummy window fail");return false;}
+    rlogLocal("overlay: dummy window ok");
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount=1; sd.BufferDesc.Width=64; sd.BufferDesc.Height=64;
+    sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow=hwnd; sd.SampleDesc.Count=1; sd.Windowed=TRUE; sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
+    IDXGISwapChain* swap{}; ID3D11Device* dev{}; ID3D11DeviceContext* ctx{}; D3D_FEATURE_LEVEL level{};
+    // Call the trampoline so HookedCreateDevice is not re-entered.
+    HRESULT hr=originalCreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&sd,&swap,&dev,&level,&ctx);
+    char buf[64]; snprintf(buf,sizeof(buf),"overlay: dummy create device hr=0x%08lx",(unsigned long)hr); rlogLocal(buf);
+    bool ok=false;
+    if(SUCCEEDED(hr)&&swap){TryInstallPresentHook(swap);ok=overlayInstalled;}
+    if(swap)swap->Release();
+    if(ctx)ctx->Release();
+    if(dev)dev->Release();
+    DestroyWindow(hwnd);
+    return ok;
+}
 bool InstallOverlay(bool lowLatency)
 {
-    // A hidden temporary swap chain gives the system's actual Present entry point.
-    auto instance = GetModuleHandleW(nullptr);
-    WNDCLASSW wc{};
-    wc.hInstance = instance;
-    wc.lpfnWndProc = DefWindowProcW;
-    wc.lpszClassName = L"thprac.D3D11.discovery";
-    RegisterClassW(&wc);
-    HWND window = CreateWindowW(wc.lpszClassName, L"", WS_OVERLAPPED, 0, 0, 32, 32,
-        nullptr, nullptr, instance, nullptr);
-    DXGI_SWAP_CHAIN_DESC desc{};
-    desc.BufferCount = 1;
-    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.OutputWindow = window;
-    desc.SampleDesc.Count = 1;
-    desc.Windowed = TRUE;
-    IDXGISwapChain* swap{};
-    ID3D11Device* discoveryDevice{};
-    ID3D11DeviceContext* discoveryContext{};
-    bool ok = false;
-    if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        0, nullptr, 0, D3D11_SDK_VERSION, &desc, &swap, &discoveryDevice, nullptr, &discoveryContext))) {
-        auto entry = (*reinterpret_cast<void***>(swap))[8];
-        ok = MH_CreateHook(entry, reinterpret_cast<void*>(Present), reinterpret_cast<void**>(&originalPresent)) == MH_OK;
-        if(ok && lowLatency)ok=InstallLowLatency((*reinterpret_cast<void***>(swap))[13]);
-        discoveryContext->Release();
-        discoveryDevice->Release();
-        swap->Release();
-    }
-    DestroyWindow(window);
-    UnregisterClassW(wc.lpszClassName, instance);
-    return ok;
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    rlogLocal("overlay: begin");
+    overlayLowLatency = lowLatency;
+    HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
+    for(int i=0;i<600 && !d3d11;i++){Sleep(50); d3d11=GetModuleHandleW(L"d3d11.dll");}
+    if (!d3d11) { rlogLocal("overlay: d3d11 not loaded"); return false; }
+    rlogLocal("overlay: d3d11 loaded");
+    auto proc = GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain");
+    if (!proc) { rlogLocal("overlay: no proc"); return false; }
+    MH_STATUS st=MH_CreateHook(reinterpret_cast<void*>(proc), reinterpret_cast<void*>(HookedCreateDevice), reinterpret_cast<void**>(&originalCreateDevice));
+    if (st != MH_OK) { char buf[64]; snprintf(buf,sizeof(buf),"overlay: createhook fail %d",st); rlogLocal(buf); return false; }
+    st=MH_EnableHook(reinterpret_cast<void*>(proc));
+    if (st != MH_OK) { char buf[64]; snprintf(buf,sizeof(buf),"overlay: enable fail %d",st); rlogLocal(buf); return false; }
+    rlogLocal("overlay: hooked create");
+    // Give the game time to call the hooked function itself; if it did not, hook Present directly.
+    for(int i=0;i<60 && !overlayInstalled;++i)Sleep(50);
+    if(!overlayInstalled)InstallPresentHookFromDummy();
+    return true;
 }
 }

@@ -1,6 +1,8 @@
 #pragma once
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <Windows.h>
+#endif
+#include <windows.h>
 #include <stdint.h>
 #include <limits.h>
 #include <limits>
@@ -15,7 +17,14 @@ extern uintptr_t ingame_image_base;
 #define RVA(a) ((uintptr_t)a + ingame_image_base)
 
 struct HookCtx;
-typedef void __fastcall Callback(PCONTEXT pCtx, HookCtx* self);
+#if defined(_MSC_VER)
+#define TH_CALLBACK_CC __cdecl
+#elif defined(__i386__)
+#define TH_CALLBACK_CC __attribute__((cdecl))
+#else
+#define TH_CALLBACK_CC
+#endif
+typedef void (TH_CALLBACK_CC *Callback)(PCONTEXT pCtx, HookCtx* self);
 
 #ifndef _WIN64
 inline void PushHelper32(CONTEXT* pCtx, DWORD value)
@@ -411,7 +420,7 @@ struct HookCtx {
     const char* name = nullptr;
     bool setup = false;
     bool enabled = false;
-    Callback* callback = nullptr;
+    Callback callback = nullptr;
 
     PatchData data;
 
@@ -446,12 +455,12 @@ HookSlice make_hook_array()
 
 #define HOOKSET_DEFINE(name) static constinit HookCtx name[] = {
 
-#define EHOOK_DY(name_, addr_, instr_size_, ...) { .addr = addr_, .name = #name_, .callback = []([[maybe_unused]] PCONTEXT pCtx, [[maybe_unused]] HookCtx * self) __VA_ARGS__, .data = PatchHookImpl(instr_size_) },
+#define EHOOK_DY(name_, addr_, instr_size_, ...) { .addr = addr_, .name = #name_, .callback = (Callback)(+[]([[maybe_unused]] PCONTEXT pCtx, [[maybe_unused]] HookCtx * self) __VA_ARGS__), .data = PatchHookImpl(instr_size_) },
 #define PATCH_DY(name_, addr_, ...) { .addr = addr_, .name = #name_, .data = PatchCode(__VA_ARGS__) },
 
 #define HOOKSET_ENDDEF() };
 
-#define EHOOK_ST(name_, addr_, instr_size_, ...) constinit HookCtx name_ { .addr = addr_, .name = #name_, .callback = []([[maybe_unused]] PCONTEXT pCtx, [[maybe_unused]] HookCtx* self) __VA_ARGS__, .data = PatchHookImpl(instr_size_) }
+#define EHOOK_ST(name_, addr_, instr_size_, ...) constinit HookCtx name_ { .addr = addr_, .name = #name_, .callback = (Callback)(+[]([[maybe_unused]] PCONTEXT pCtx, [[maybe_unused]] HookCtx* self) __VA_ARGS__), .data = PatchHookImpl(instr_size_) }
 #define PATCH_ST(name_, addr_, ...) constinit HookCtx name_ { .addr = addr_, .name = #name_, .data = PatchCode(__VA_ARGS__)}
 
 
@@ -485,7 +494,11 @@ static inline R asm_call(Args... args) {
         return func(args...);
     }
     else if constexpr (type == Vectorcall) {
+#if defined(_MSC_VER) && !defined(_M_X64)
         auto* func = (R(__vectorcall*)(Args...))addr;
+#else
+        auto* func = (R(*)(Args...))addr;
+#endif
         return func(args...);
     }
     else if constexpr (type == Thiscall) {
@@ -508,7 +521,11 @@ static inline R asm_call_rel(Args... args)
         auto* func = (R(__fastcall*)(Args...))_addr;
         return func(args...);
     } else if constexpr (type == Vectorcall) {
+#if defined(_MSC_VER) && !defined(_M_X64)
         auto* func = (R(__vectorcall*)(Args...))_addr;
+#else
+        auto* func = (R(*)(Args...))_addr;
+#endif
         return func(args...);
     } else if constexpr (type == Thiscall) {
         auto* func = (R(__thiscall*)(Args...))_addr;

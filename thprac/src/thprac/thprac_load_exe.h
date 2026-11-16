@@ -1,5 +1,5 @@
 #pragma once
-#include <Windows.h>
+#include <windows.h>
 #include <stdint.h>
 
 #include "thprac_identify.h"
@@ -12,7 +12,7 @@ void* GetNtDataDirectory(HMODULE hMod, BYTE directory);
 
 
 // DO NOT CHANGE THIS STRUCT WITHOUT RECOMPILING init_shellcode.cpp
-__declspec(align(16)) struct remote_param {
+struct alignas(16) remote_param {
     UINT_PTR pRemoteParamAddr;
     decltype(LoadLibraryW)* pLoadLibraryW;
     decltype(LoadLibraryA)* pLoadLibraryA;

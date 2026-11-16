@@ -11,6 +11,7 @@ namespace TH18 {
     // MSVC WILL generate suboptimal code here if I don't hand-write my own assembly here
 #pragma warning(push)
 #pragma warning(disable : 4100)
+#ifdef _MSC_VER
     __declspec(naked) void __fastcall globals_assign_hooked(uint32_t* glob1, void*, uint32_t* glob2)
     {
         __asm {
@@ -24,6 +25,21 @@ namespace TH18 {
             ret 0x4
         }
     }
+#else
+    __attribute__((fastcall,naked)) void globals_assign_hooked(uint32_t* /*glob1*/, uint32_t* /*glob2*/)
+    {
+        __asm__ volatile(
+            "push %esi\n"
+            "mov 0x20(%ecx), %esi\n"
+            "push 4(%esp)\n"
+            "mov $0x417A60, %eax\n"
+            "call *%eax\n"
+            "mov %esi, 0x20(%eax)\n"
+            "pop %esi\n"
+            "ret $0x4\n"
+        );
+    }
+#endif
 #pragma warning(pop)
 
     enum sound_id : uint32_t {

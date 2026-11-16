@@ -1,5 +1,5 @@
 // Original TH06 stage portions; ECLWarp translates to the NC timeline.
-    __declspec(noinline) void THStageWarp([[maybe_unused]] ECLHelper& ecl, int stage, int portion)
+    TH_NOINLINE void THStageWarp([[maybe_unused]] ECLHelper& ecl, int stage, int portion)
     {
         if (stage == 1) {
             switch (portion) {

@@ -462,18 +462,19 @@ bool RunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags) {
     };
     PROCESS_INFORMATION pi = {};
 
-    const wchar_t* file_spec = std::max(wcsrchr(exeFn, L'\\'), wcsrchr(exeFn, L'/'));
-    BOOL ret;
+    // Always work with a full path so the game's working directory is its own directory,
+    // no matter where thprac was started from.
+    wchar_t fullPathBuf[MAX_PATH * 2] = {};
+    DWORD fullPathLen = GetFullPathNameW(exeFn, (DWORD)std::size(fullPathBuf), fullPathBuf, nullptr);
+    std::wstring exePath = (fullPathLen && fullPathLen < std::size(fullPathBuf)) ? std::wstring(fullPathBuf, fullPathLen) : std::wstring(exeFn);
 
-    std::wstring exeDir;
-    if (file_spec) {
-        exeDir = std::wstring(exeFn, file_spec);
-        ret = CreateProcessW(exeFn, cmdLine, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, exeDir.c_str(), &si, &pi);
-    } else {
-        ret = CreateProcessW(exeFn, cmdLine, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
-    }
+    size_t fileSpec = exePath.find_last_of(L"\\/");
+    std::wstring exeDir = fileSpec == std::wstring::npos ? std::wstring(L".") : exePath.substr(0, fileSpec);
+
+    BOOL ret = CreateProcessW(exePath.c_str(), cmdLine, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, exeDir.c_str(), &si, &pi);
 
     if (!ret) {
+        log_printf("thprac: failed to start %s (error %lu)\n", utf16_to_utf8(exePath.c_str()).c_str(), GetLastError());
         return false;
     }
 
@@ -488,13 +489,38 @@ bool RunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags) {
         TryLoadVpatch(pi.hProcess, exeDir.c_str());
     }
 
+    bool injected = false;
     if (flags & RUN_FLAG_THPRAC) {
-        if (WriteTHPracSig(pi.hProcess, GetProcessModuleBase(pi.hProcess))) {
-            LoadSelf(pi.hProcess);
+        // First try while the process is still suspended (the usual way).
+        const uintptr_t base = GetProcessModuleBase(pi.hProcess);
+        if (base && WriteTHPracSig(pi.hProcess, base)) {
+            injected = LoadSelf(pi.hProcess);
+        }
+        if (!injected) {
+            log_printf("thprac: injecting into the suspended process failed (error %lu); will retry after the game has started\n", GetLastError());
         }
     }
 
     ResumeThread(pi.hThread);
+
+    if ((flags & RUN_FLAG_THPRAC) && !injected) {
+        // Fallback for environments (e.g. Wine) where a remote thread cannot be run
+        // in a process that has not finished initialising: attach once the game is up.
+        for (int i = 0; i < 100 && !injected; i++) {
+            Sleep(100);
+            DWORD exitCode = 0;
+            if (!GetExitCodeProcess(pi.hProcess, &exitCode) || exitCode != STILL_ACTIVE) {
+                break;
+            }
+            if (i < 20 && WaitForInputIdle(pi.hProcess, 0) == WAIT_TIMEOUT) {
+                continue;
+            }
+            injected = LoadSelf(pi.hProcess);
+        }
+        if (!injected) {
+            log_printf("thprac: could not hook into the game\n");
+        }
+    }
 
     // TODO: determine if these should be returned
     CloseHandle(pi.hProcess);

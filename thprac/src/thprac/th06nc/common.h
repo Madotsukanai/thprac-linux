@@ -6,6 +6,25 @@
 #include <vector>
 #include <algorithm>
 #include "sections.h"
+#if defined(_MSC_VER)
+#define TH_NOINLINE __declspec(noinline)
+#else
+#define TH_NOINLINE __attribute__((noinline))
+#endif
+
+#if defined(__MINGW32__) || defined(__GNUC__)
+#define _TRUNCATE ((size_t)-1)
+inline errno_t wcsncpy_s(wchar_t* dest, size_t destsz, const wchar_t* src, size_t count) {
+    if (!dest || !destsz) return 22;
+    if (count == _TRUNCATE) { wcsncpy(dest, src, destsz - 1); dest[destsz - 1] = 0; return 0; }
+    wcsncpy(dest, src, count < destsz ? count : destsz - 1); dest[destsz - 1] = 0; return 0;
+}
+#ifndef __MINGW32__
+inline size_t strnlen_s(const char* s, size_t maxsize) { if(!s) return 0; size_t n=0; while(n<maxsize && s[n]) n++; return n; }
+#endif
+#define _stricmp strcasecmp
+#endif
+
 
 constexpr uint32_t Magic = 0x4e435031, Protocol = 10, ReplayProtocol = 7;
 constexpr wchar_t ExpectedHash[] = L"07850c8c6e469c0e82c13423e6d0d096a88d693455bdacacbb44c0aa3bcce473";
@@ -39,31 +58,43 @@ struct Shared {
     uint32_t lowLatencyError=0;
 };
 // Supplied by the bridge before injection; immutable for this game process.
-struct LaunchOptions { uint32_t magic=Magic, version=Protocol; int practice=1, lowLatency=0, language=1; };
-inline std::wstring mapName(DWORD pid) { return L"Local\\Th06NcPractice_"+std::to_wstring(pid); }
+struct LaunchOptions { uint32_t magic=Magic, version=Protocol; int practice=1, lowLatency=0, language=1, build=0; };
+inline std::wstring mapName(DWORD pid) { return L"Global\\Th06NcPractice_"+std::to_wstring(pid); }
 inline std::wstring mutexName(DWORD pid) { return mapName(pid)+L"_lock"; }
 inline std::wstring launchName(DWORD pid) { return mapName(pid)+L"_launch"; }
 inline std::wstring executablePath(HMODULE module=nullptr) {
     std::wstring s(32768,L'\0'); auto n=GetModuleFileNameW(module,s.data(),DWORD(s.size())); s.resize(n); return s;
 }
 inline std::wstring directory(const std::wstring& p) { return p.substr(0,p.find_last_of(L"\\/")); }
+inline void _thlog(const char* msg,unsigned v=0){FILE* f=fopen("thprac-th06nc.log","ab");if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}}
 inline GameBuild identifyBuild(const std::wstring& path) {
-    HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
-    if(file==INVALID_HANDLE_VALUE) return GameBuild::Unsupported;
+    _thlog("identify open ",0);
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
+    if(file==INVALID_HANDLE_VALUE) {_thlog("identify open fail ",GetLastError()); return GameBuild::Unsupported;}
     BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{}; GameBuild build=GameBuild::Unsupported;
-    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0 &&
-       BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)>=0) {
-        std::vector<unsigned char> buffer(65536); DWORD n=0; bool readOk=true;
-        while(true) { if(!ReadFile(file,buffer.data(),DWORD(buffer.size()),&n,nullptr)) {readOk=false;break;}
-          if(!n) break; if(BCryptHashData(hash,buffer.data(),n,0)<0){readOk=false;break;} }
-        unsigned char digest[32]{}; if(readOk && BCryptFinishHash(hash,digest,32,0)>=0) {
+    NTSTATUS st=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0);
+    _thlog("bcrypt open st=", (unsigned)(st&0xffffffff));
+    if(st>=0) st=BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0);
+    _thlog("bcrypt create st=", (unsigned)(st&0xffffffff));
+    if(algorithm && hash) {
+        std::vector<unsigned char> buffer(65536); DWORD n=0; bool readOk=true; unsigned chunks=0;
+        while(true) { if(!ReadFile(file,buffer.data(),DWORD(buffer.size()),&n,nullptr)) {readOk=false;_thlog("read fail ",GetLastError());break;}
+          if(!n) break; st=BCryptHashData(hash,buffer.data(),n,0); if(st<0){readOk=false;_thlog("hash data st=",(unsigned)(st&0xffffffff));break;}
+          if((++chunks % 512)==0) _thlog("hashed chunks=",chunks);
+        }
+        _thlog("read done chunks=",chunks);
+        unsigned char digest[32]{}; if(readOk) st=BCryptFinishHash(hash,digest,32,0); else st=-1;
+        _thlog("finish st=",(unsigned)(st&0xffffffff));
+        if(readOk && st>=0) {
           std::wstring value; const wchar_t* hex=L"0123456789abcdef";
           for(auto c:digest){value+=hex[c>>4];value+=hex[c&15];}
           if(value==ExpectedHash)build=GameBuild::Original;
           else if(value==Steam25306795Hash)build=GameBuild::Steam25306795;
         }
     }
-    if(hash)BCryptDestroyHash(hash); if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0); CloseHandle(file);return build;
+    if(hash)BCryptDestroyHash(hash); if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0); CloseHandle(file);
+    _thlog("identify done ", (unsigned)build);
+    return build;
 }
 inline bool supportedFile(const std::wstring& path) { return identifyBuild(path)!=GameBuild::Unsupported; }
 inline bool valid(const Settings& s) {

@@ -24,8 +24,7 @@ inline bool LargeBottomButton(const char* text, float height, float offset = 0.0
     return ImGui::Button(text, { wnd_dim.x, height });
 }
 
-static union {
-LauncherGame gamesAll[ID_TH_MAX - 1] = {
+static LauncherGame gamesAll[ID_TH_MAX - 1] = {
     {
         .id = ID_TH01,
     },
@@ -308,17 +307,13 @@ LauncherGame gamesAll[ID_TH_MAX - 1] = {
         .shot_columns = 4,
     },
 };
-struct {
-    LauncherGame pc98Games_filler[PC98_GAMES_LEN];
-    LauncherGame mainGames[MAIN_GAMES_LEN];
-    LauncherGame spinoffShmups[SPINOFF_SHMUP_LEN];
-    LauncherGame spinoffOthers[SPINOFF_OTHER_LEN];
-};
-struct {
-    LauncherGame pc98Games[PC98_GAMES_LEN];
-    LauncherGame games[GAMES_LEN];
-};
-};
+
+static LauncherGame (&pc98Games)[PC98_GAMES_LEN] = *reinterpret_cast<LauncherGame (*)[PC98_GAMES_LEN]>(gamesAll);
+static LauncherGame (&games)[GAMES_LEN] = *reinterpret_cast<LauncherGame (*)[GAMES_LEN]>(gamesAll + PC98_GAMES_LEN);
+static LauncherGame (&mainGames)[MAIN_GAMES_LEN] = *reinterpret_cast<LauncherGame (*)[MAIN_GAMES_LEN]>(gamesAll + PC98_GAMES_LEN);
+static LauncherGame (&spinoffShmups)[SPINOFF_SHMUP_LEN] = *reinterpret_cast<LauncherGame (*)[SPINOFF_SHMUP_LEN]>(gamesAll + PC98_GAMES_LEN + MAIN_GAMES_LEN);
+static LauncherGame (&spinoffOthers)[SPINOFF_OTHER_LEN] = *reinterpret_cast<LauncherGame (*)[SPINOFF_OTHER_LEN]>(gamesAll + PC98_GAMES_LEN + MAIN_GAMES_LEN + SPINOFF_SHMUP_LEN);
+
 
 static bool LauncherRunWithThcrap(std::wstring_view dir, std::wstring_view runcfg, THGameID game, bool custom = false) {
     std::wstring_view loader_release = L"\\bin\\thcrap_loader.exe";
@@ -1760,14 +1755,12 @@ void ThcrapAddConfigsUI(LauncherState* state) {
                     continue;
                 }
 
-                auto& g = found.emplace_back() = {
-                    .selected = (bool)state->foundThcrapConfigsSel[j],
-                    .info = {
-                        .ver = games[i].versions,
-                        .type = TYPE_THCRAP,
-                    },
-                };
-                strncpy(g.path, state->foundThcrapConfigs[j], MAX_PATH);
+                FoundGame fg {};
+                fg.selected = (bool)state->foundThcrapConfigsSel[j];
+                fg.info.ver = games[i].versions;
+                fg.info.type = TYPE_THCRAP;
+                strncpy(fg.path, state->foundThcrapConfigs[j], MAX_PATH);
+                found.push_back(fg);
             }
             ScanAddInstances(games + i, found.data(), found.size(), state->settings.apply_thprac_default == APPLY_THPRAC_DEFAULT_OPEN);
         }

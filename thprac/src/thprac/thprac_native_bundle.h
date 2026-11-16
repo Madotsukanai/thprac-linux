@@ -1,5 +1,9 @@
 #pragma once
-#include <Windows.h>
+#include <windows.h>
+#ifndef SHANDLE_PTR
+#include <basetsd.h>
+typedef LONG_PTR SHANDLE_PTR;
+#endif
 #include <shlobj.h>
 #include <algorithm>
 #include <cstring>

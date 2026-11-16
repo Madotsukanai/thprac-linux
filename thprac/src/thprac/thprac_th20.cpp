@@ -1,4 +1,5 @@
 #include "thprac_games.h"
+#include <cstring>
 #include "thprac_utils.h"
 #include <format>
 #include <math.h>

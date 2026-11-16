@@ -208,7 +208,7 @@ struct PlayerBarrier { /* size uncertain */
     int anm_id;
 };
 
-#include <Windows.h>
+#include <windows.h>
 
 void drawEnemyHP(PCONTEXT pCtx);
 

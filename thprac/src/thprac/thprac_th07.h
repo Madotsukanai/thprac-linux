@@ -9,7 +9,7 @@ namespace TH07 {
 
 // Struct definitions from https://github.com/exphp-share/th-re-data (modified)
 
-__declspec(align(4)) struct Globals {
+struct alignas(4) Globals {
     int32_t displayed_score;
     int32_t true_score;
     int32_t __dword_8;

@@ -17,19 +17,19 @@ TrackerInfo tracker_info = {};
 bool tracker_open = false;
 
 
-void __fastcall th10_tracker_count_miss(PCONTEXT, HookCtx*) {
+void TH_CALLBACK_CC th10_tracker_count_miss(PCONTEXT, HookCtx*) {
     tracker_info.th10.misses++;
 }
 
-void __fastcall th10_tracker_count_bomb(PCONTEXT, HookCtx*) {
+void TH_CALLBACK_CC th10_tracker_count_bomb(PCONTEXT, HookCtx*) {
     tracker_info.th10.bombs++;
 }
 
-void __fastcall th13_tracker_count_trance(PCONTEXT, HookCtx*) {
+void TH_CALLBACK_CC th13_tracker_count_trance(PCONTEXT, HookCtx*) {
     tracker_info.th13.trance++;
 }
 
-void __fastcall tracker_reset(PCONTEXT, HookCtx*) {
+void TH_CALLBACK_CC tracker_reset(PCONTEXT, HookCtx*) {
     memset(&tracker_info, 0, sizeof(tracker_info));
 }
 
@@ -94,7 +94,7 @@ HRESULT IDirectInputDevice8_GetDeviceState_Hook(IDirectInputDevice8A* This, DWOR
     return res;
 }
 
-void __fastcall IDirectInputDevice8_GetDeviceState_VEHHook(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
+void TH_CALLBACK_CC IDirectInputDevice8_GetDeviceState_VEHHook(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
 {
     pCtx->Eax = IDirectInputDevice8_GetDeviceState_Hook(
         GetMemContent<IDirectInputDevice8A*>(pCtx->Esp + 0),
@@ -198,7 +198,7 @@ void iat_hook_joyGetPosEx()
 
 void SetDpadHook(uintptr_t addr, size_t instr_len) {
     static constinit HookCtx dpad_hook = {
-        .callback = IDirectInputDevice8_GetDeviceState_VEHHook,
+        .callback = (Callback)IDirectInputDevice8_GetDeviceState_VEHHook,
         .data = PatchData()
     };
 

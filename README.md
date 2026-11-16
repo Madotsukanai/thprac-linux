@@ -1,68 +1,129 @@
-# thprac-th06nc
+# thprac-th06nc (Linux / Wine 向けビルド)
 
-[简体中文](README_CN.md) | [日本語](README_JP.md)
+[thprac](https://github.com/touhouworldcup/thprac) の非公式フォーク [thprac-th06nc](https://github.com/zxxsmart/thprac-th06nc) を、**Linux 上でビルドし、Wine / Proton で動かす**ための移植版です。
 
-An **unofficial fork of [thprac](https://github.com/touhouworldcup/thprac)** with practice support for the Steam edition of **Touhou Koumakyou: New Classic**.
+- Windows 用の Visual Studio は不要です。MinGW-w64 によるクロスコンパイルで `thprac-th06nc.exe` を生成します。
+- 生成した exe をゲームのフォルダに置いて起動すると、同じフォルダにある東方の exe を検出し、thprac をフックした状態で起動します。
 
-**[Download the latest release](https://github.com/zxxsmart/thprac-th06nc/releases/latest)** · [Report an issue](https://github.com/zxxsmart/thprac-th06nc/issues)
+> **ステータス: 実験的**
+> ビルド手順と自動起動は整備中です。環境によっては練習メニューが出ない場合があります(風神録 `th10.exe` を Proton で動かす件は調査中)。うまく動かないときは「[トラブルシューティング](#トラブルシューティング)」を参照してください。
 
-Current source version: **1.1.1**. Based on thprac **2.3.1.1**, upstream commit `55e6ed1336621e3099e7df1138acc360cf0500fa`.
+## 必要なもの
 
-## Install and use
+| ツール | 用途 |
+| --- | --- |
+| `i686-w64-mingw32-{gcc,g++,windres,objdump}` | 32bit ランチャーのビルド |
+| `x86_64-w64-mingw32-{gcc,g++,windres}` | 64bit モジュール / ロケール生成ツールのビルド |
+| CMake 3.24 以上 | 64bit モジュールと FreeType のビルド |
+| Python 3 | リソース(ペイロード)生成 |
+| Wine | ロケール定義の生成(`loc_json.exe`)の実行 |
+| `curl`, `tar`, `xz` | FreeType のソース取得と展開 |
+| GNU Make | ビルド |
 
-1. Download `thprac-th06nc.exe` from this fork's Releases. No additional DLL downloads are needed.
-2. Run it, select the New Classic Steam instance, enable thprac, and launch.
-3. In the game, select **Practice Start → difficulty, character, stage → practice settings → Z**.
+ゲーム本体は別途ご自身で入手・インストールしてください。このリポジトリにはゲームの実行ファイルや素材は含まれません。
 
-If the game is already running, open **Tools → Apply thprac to a running game** in the launcher. After attaching, return to the game's main menu and enter Practice Start.
+## ビルド
 
-**Experimental low-latency display:** enable **Launch with low latency** before starting New Classic. This option is off by default and works independently of practice features. Use **Borderless** (recommended) or **Window**, with your preferred high refresh rate selected in Windows. It reduces display waiting and may cause tearing; game speed and replay rules are unchanged. Unsupported display modes, including exclusive Full Screen, use the original display path. Restart the game after changing the launcher option.
-
-Implementation, high-refresh behavior and risks: [Low-latency mode](LOW_LATENCY.md#en).
-
-Supported game: **Steam th06nc build 25306795 and the original 1.03 executable**, Windows x64. The executable SHA-256 selects the matching address layout before injection:
-
-```text
-48630a42a2eb6762d0db2a7e0d151203efbe67220fef7d2f9d0d51857928ac82  Steam build 25306795
-07850c8c6e469c0e82c13423e6d0d096a88d693455bdacacbb44c0aa3bcce473  Original 1.03
+```sh
+make        # = make all
 ```
 
-Game updates may require a new adapter release. You must own and install the game separately.
+成功すると `build/linux-x64/dist/thprac-th06nc.exe` が生成されます。
 
-## Practice features
-
-- TH06-style stage portions and boss attacks: 73 boss selections and 40 stage portions, including the three new Extra spells.
-- Normal stage-practice flow, with later attacks continuing after the selected spell.
-- Starting resources, optional custom Rank, dialogue and supported attack phases. Rank defaults to the game's native fixed value.
-- Esc: resume, exit, retry or edit settings. Backspace: compact keyboard-only F1–F7 status panel. F11: game speed.
-- While editing numbers, Z applies the value and starts practice from the initial settings menu; Backspace only deletes text.
-- Chinese, English and Japanese UI follows the launcher's language. New Classic's official English/Japanese spell names are used.
-- Native replay-save confirmation after exiting or finishing practice. Keep both `.rpy` and `.rpy.thprac-nc`; NC replay metadata uses v7.
-
-Other supported games use the upstream thprac modules.
-
-## Updates
-
-Updates are **manual**. The launcher opens this fork's Releases page in your browser. Download the new EXE, close the game and launcher, and replace your copy. There are no background version requests, automatic downloads or executable replacement.
-
-The EXE embeds its native module, bridge, dependencies, documentation and licenses. When launching New Classic, it extracts verified files to `%LOCALAPPDATA%\thprac\th06nc\<content-hash>\`. Windows fonts are read locally at runtime.
-
-## Source and build
-
-Use Visual Studio 2022 with C++ tools, ClangCL and Windows SDK, CMake 3.24+, and Python 3.8+:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -SingleFile -Python python
+```sh
+make clean  # build/ 以下を削除
 ```
 
-Output: `build/single/thprac-th06nc.exe`. The build includes both the Win32 launcher and x64 NC module. Extracted game files are not required to compile the adapter.
+### ビルドの流れ
 
-[Detailed usage/build notes](README_NC.md) · [Release notes](CHANGELOG.md)
+1. Wine で `loc_json.exe` を実行し、ロケール定義(`thprac_locale_def.cpp/.h`)を生成
+2. CMake で 64bit モジュール(`thprac_th06nc`)とブリッジ(`thprac_bridge64`)をビルド
+3. FreeType 2.13.3 のソースを `build/linux-x86/freetype/` に取得し、32bit 静的ライブラリとしてビルド
+4. 32bit ランチャーを静的リンクでビルドし、上記のモジュール類をリソースとして埋め込む
+5. 生成した exe が `libstdc++` / `libwinpthread` / `libgcc_s` の DLL に依存していないかを検査
 
-## Attribution and licenses
+### Make の変数
 
-Original thprac: Copyright (c) 2022 Ack and thprac contributors, [MIT License](LICENCE). Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). This software is based in part on the work of the FreeType Team and uses FreeType under the FTL.
+```sh
+make FT_VERSION=2.13.3 FT_URL=https://.../freetype-2.13.3.tar.xz
+make MINGW32_CXX=i686-w64-mingw32-g++ WINE=wine
+```
 
-Touhou Project and the supported game belong to Team Shanghai Alice and their respective rights holders. This is an unofficial fan-made practice tool, not endorsed by the game developers, publisher, thprac maintainers or TWC. No game executable, archive, graphics, music or font files are distributed with the tool.
+主な変数: `MINGW32_CXX` / `MINGW32_CC` / `MINGW64_CXX` / `MINGW64_CC` / `WINDRES32` / `WINDRES64` / `OBJDUMP32` / `WINE` / `PYTHON` / `BUILD_DIR` / `FT_VERSION` / `FT_URL`
 
-The NC adapter was developed with AI assistance. This fork has its own issue tracker and releases; upstream contribution policies remain documented in [the upstream contribution guide](docs/upstream/CONTRIBUTING.md).
+初回ビルドでは FreeType のダウンロードにネットワーク接続が必要です。`build/linux-x86/freetype/freetype-<バージョン>.tar.xz` に tarball を置いておけばダウンロードは省略されます。
+
+## 使い方
+
+### ゲームのフォルダに置いて起動する(推奨)
+
+1. `thprac-th06nc.exe` を、ゲームの exe(例: `th10.exe`)と**同じフォルダ**にコピーします。
+2. Wine で起動します。
+
+   ```sh
+   cd /path/to/th10
+   wine thprac-th06nc.exe
+   ```
+
+3. 同じフォルダにある既知の東方の exe が見つかると、自動的に thprac をフックしてゲームを起動します。
+
+動作の詳細:
+
+- 検索順は、まず thprac 本体と同じフォルダ、次に thprac を起動したカレントディレクトリです。
+- 通常の名前(`thXX.exe`)のゲームを先に探し、その後に名前が異なる exe を探します。
+- フックはゲームをサスペンド状態で起動して注入する方式です。失敗した場合は、ゲーム起動後に最大約10秒リトライして再注入します。
+- 見つからない場合や、設定で自動起動を無効にしている場合は、通常のランチャー画面を開きます(設定項目: `existing_game_launch_action`)。
+
+### Steam(Proton)から起動する
+
+非 Steam ゲームとして `thprac-th06nc.exe` を追加し、Proton で起動します。ゲームの exe と同じフォルダに置いてください。
+
+### 東方紅魔郷 New Classic
+
+`th06nc` 向けの機能は、64bit モジュールとブリッジ経由で動作します。使い方と機能は [README_NC.md](README_NC.md) を参照してください。
+
+## トラブルシューティング
+
+### 起動直後に終了する / ウィンドウが出ない
+
+Proton のログに次のようなエラーがないか確認してください。
+
+```
+err:module:import_dll Library libstdc++-6.dll ... not found
+```
+
+これは exe が MinGW のランタイム DLL に動的依存しているときに出ます。現在の `Makefile` は静的リンクを強制し、ビルド後に検査して依存が残っていればエラーで止めます。古いビルドの exe を使っていないか確認してください(その場合は `make clean && make` で再ビルドします)。
+
+### ゲームは起動するが練習メニューが出ない
+
+- ゲームの exe が thprac の対応バージョンかを確認してください(exe の内容で判別します)。
+- コンソール出力を有効にして、`thprac:` で始まるログ(注入の失敗など)を確認してください。
+- Proton のログは多すぎて読みにくくなります。次のように絞ると見やすくなります。
+
+  ```sh
+  WINEDEBUG=err+all,warn+module wine thprac-th06nc.exe
+  ```
+
+原因が分からない場合は、ログを添えて Issue を作成してください。その際、Wine / Proton のバージョン、ゲームのバージョン、ゲームの exe 名を併記してください。
+
+## ディレクトリ構成
+
+| パス | 内容 |
+| --- | --- |
+| `Makefile` | Linux 向けビルド(`make` / `make all`) |
+| `tools/launcher_srcs.txt` | 32bit ランチャーのソース一覧 |
+| `tools/make_payload_rc.py` | 埋め込みリソース(ペイロード)の生成 |
+| `CMakeLists.txt` | 64bit モジュール / ブリッジ |
+| `thprac/src/thprac/` | thprac 本体(ゲーム別モジュール、フック、ランチャー) |
+| `thprac/src/thprac/th06nc/` | New Classic 向けの実装 |
+| `thprac/src/3rdParties/` | ImGui, MinHook, yyjson, FreeType ヘッダなど |
+| `build/linux-x64/` | 64bit 側の中間生成物と最終成果物(`dist/`) |
+| `build/linux-x86/` | 32bit ランチャーと FreeType の中間生成物 |
+
+## ライセンスと謝辞
+
+- thprac 本体: Copyright (c) 2022 Ack and thprac contributors, [MIT License](LICENCE)
+- サードパーティ: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) を参照してください。FreeType は FTL に基づいて使用しています(This software is based in part on the work of the FreeType Team)。
+- 変更履歴: [CHANGELOG.md](CHANGELOG.md)
+
+東方Projectおよび対応ゲームは上海アリス幻樂団および各権利者に帰属します。本ツールは非公式のファンメイド練習ツールで、ゲームの開発元・発行元、thprac のメンテナー、TWC のいずれにも承認されたものではありません。ゲームの実行ファイルや素材は含みません。

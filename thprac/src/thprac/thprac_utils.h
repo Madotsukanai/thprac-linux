@@ -1,7 +1,31 @@
 #pragma once
 
+// mingw compat
+#if !defined(_MSC_VER)
+#ifndef __forceinline
+#define __forceinline inline __attribute__((always_inline))
+#endif
+#ifndef __stdcall
+#define __stdcall __attribute__((stdcall))
+#endif
+#ifndef __cdecl
+#define __cdecl __attribute__((cdecl))
+#endif
+#ifndef __fastcall
+#define __fastcall __attribute__((fastcall))
+#endif
+#ifndef __thiscall
+#define __thiscall __attribute__((thiscall))
+#endif
+#endif
+
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <Windows.h>
+#endif
+#include <windows.h>
+#if !defined(_MSC_VER)
+#include <malloc.h>
+#endif
 
 #include <string.h>
 #include <stdint.h>
@@ -237,7 +261,7 @@ bool yyjson_eval_numeric(yyjson_val* val, T* out) noexcept
 // would also guarantee inlining even in debug mode.
 //
 #define CPP_YYJSON_MUT_OBJ_ADD_DECL(tname_cpp, tname_yy) \
-__forceinline bool yyjson_mut_obj_add(yyjson_mut_doc* doc, yyjson_mut_val* obj, const char* key, tname_cpp val) { \
+inline bool yyjson_mut_obj_add(yyjson_mut_doc* doc, yyjson_mut_val* obj, const char* key, tname_cpp val) { \
     return yyjson_mut_obj_add_##tname_yy(doc, obj, key, val); \
 }
 CPP_YYJSON_MUT_OBJ_ADD_DECL(bool, bool)

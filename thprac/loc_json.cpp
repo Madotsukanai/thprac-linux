@@ -94,14 +94,14 @@ int printf_warn(const char* format, ...) {
 #define SKIP_IF(statement, warning, ...) \
 if (statement) \
 {\
-	printf_warn(warning, __VA_ARGS__); \
+	printf_warn(warning, ##__VA_ARGS__); \
 	printf_warn(ENDL); \
 	continue; \
 }
 #define BREAK_IF(statement, warning, ...) \
 if (statement) \
 {\
-	printf_warn(warning, __VA_ARGS__); \
+	printf_warn(warning, ##__VA_ARGS__); \
 	printf_warn(ENDL); \
 	break; \
 }
@@ -1081,7 +1081,7 @@ vector<game_t> loc_json_parse(yyjson_doc* doc) {
 }
 
 #ifdef _WIN32
-#include <Windows.h>
+#include <windows.h>
 #include <optional>
 
 struct MappedFile {

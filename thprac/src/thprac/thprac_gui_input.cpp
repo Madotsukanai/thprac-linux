@@ -3,7 +3,7 @@
 #include "thprac_gui_impl_win32.h"
 #include <imgui.h>
 #define NOMINMAX
-#include <Windows.h>
+#include <windows.h>
 #include <cstdint>
 
 namespace THPrac

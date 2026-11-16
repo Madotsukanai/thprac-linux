@@ -1,5 +1,5 @@
 // Original TH06 practice patch recipes, translated by the verified ECL address map.
-    __declspec(noinline) void THPatch(ECLHelper& ecl, th_sections_t section)
+    TH_NOINLINE void THPatch(ECLHelper& ecl, th_sections_t section)
     {
         int shot;
         auto s2b_nd = [&]() {

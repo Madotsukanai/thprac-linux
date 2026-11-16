@@ -2269,12 +2269,16 @@ namespace TH08 {
         int32_t temp = 0;
         int32_t* award = (int32_t*)GetMemAddr(0x160f510, 0x34);
         while (true) {
+#ifdef _MSC_VER
             __asm
                 {
 					pushad
 					call pPointFunc
 					popad
                 }
+#else
+            ((void (__cdecl*)())pPointFunc)();
+#endif
             temp = (int32_t)GetMemContent(0x160f510, 0x38);
             if (*point_total_1 < temp)
                 break;

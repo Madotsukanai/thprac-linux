@@ -24,7 +24,11 @@ void HookCtx::Enable()
 {
     if (!this->data.buffer.ptr) {
         MessageBoxA(NULL, "No codecave or patch buffer for hook", this->name, MB_ICONERROR);
+        #ifdef _MSC_VER
         __debugbreak();
+#else
+        __builtin_trap();
+#endif
     } else if (!this->setup) {
         MessageBoxA(NULL, "Hook not setup. Note that patches work without setup, unless the addresses used are RVAs", this->name, MB_ICONWARNING);
     }

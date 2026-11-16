@@ -247,7 +247,7 @@ namespace TH09 {
 
     PATCH_ST(th09_disable_map_select, 0x424671, "C20400");
 
-    void __fastcall th09_chargelock_bomb(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
+    void TH_CALLBACK_CC th09_chargelock_bomb(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
     {
         TH09Tools& t = TH09Tools::singleton();
         uint32_t side = *(uint32_t*)(pCtx->Esi + 0x8);
@@ -255,7 +255,7 @@ namespace TH09 {
             pCtx->Eip += 12;
     }
 
-    void __fastcall th09_chargelock_ret(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
+    void TH_CALLBACK_CC th09_chargelock_ret(PCONTEXT pCtx, [[maybe_unused]] HookCtx* self)
     {
         TH09Tools& t = TH09Tools::singleton();
         uint32_t side = *(uint32_t*)(pCtx->Ecx + 0x8);
@@ -371,7 +371,7 @@ namespace TH09 {
         t.enabled = false;
         DisablePracHook();
     })
-#define CHARGELOCK_BOMB(addr_) { .addr = addr_, .callback = th09_chargelock_bomb, .data = PatchHookImpl(6) },
+#define CHARGELOCK_BOMB(addr_) { .addr = addr_, .callback = (Callback)th09_chargelock_bomb, .data = PatchHookImpl(6) },
     CHARGELOCK_BOMB(0x41ca86)
     CHARGELOCK_BOMB(0x41cb39)
     CHARGELOCK_BOMB(0x41cab9)
@@ -381,7 +381,7 @@ namespace TH09 {
     CHARGELOCK_BOMB(0x41e51c)
     CHARGELOCK_BOMB(0x41e5ac)
 #undef CHARGELOCK_BOMB
-#define CHARGELOCK_RET(addr_) { .addr = addr_, .callback = th09_chargelock_ret, .data = PatchHookImpl(1) },
+#define CHARGELOCK_RET(addr_) { .addr = addr_, .callback = (Callback)th09_chargelock_ret, .data = PatchHookImpl(1) },
     CHARGELOCK_RET(0x41f310)
     CHARGELOCK_RET(0x41bc90)
 #undef CHARGELOCK_RET

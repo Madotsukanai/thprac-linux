@@ -3,6 +3,7 @@
 #include "thprac_hook.h"
 #include "thprac_log.h"
 #include "thprac_gui_components.h"
+#include <cmath>
 #include "thprac_version.h"
 
 #include <vector>
@@ -473,8 +474,7 @@ public:
         operator<<(data.second);
         return *this;
     }
-    template <>
-    VFile& operator<< <const char*>(const char* data)
+    VFile& operator<<(const char* data)
     {
         Write(data);
         return *this;
@@ -557,7 +557,7 @@ static inline constexpr T garbage_value(void)
 #pragma endregion
 
 #pragma region D-Pad Support
-bool __stdcall IDirectInputDevice8_GetDeviceState_VEHHook(PCONTEXT pCtx);
+void TH_CALLBACK_CC IDirectInputDevice8_GetDeviceState_VEHHook(PCONTEXT pCtx, HookCtx* self);
 #pragma endregion
 
 #pragma region ECL Helper
@@ -610,7 +610,7 @@ inline float NormRad(float angle) {
         // This statement is basically an expanded fmod that was then simplified with WolframAlpha
         angle = angle - PI * (2.0f * MY_TRUNC((angle + PI) / TWO_PI) - 1.0f);
         // Depending on the sign of the previous expression, either π or -π needs to be added
-        return angle - copysignf(PI, angle);
+        return angle - std::copysign(PI, angle);
     } else {
         return angle;
     }
@@ -760,10 +760,10 @@ union TrackerInfo {
 extern TrackerInfo tracker_info;
 extern bool tracker_open;
 
-void __fastcall th10_tracker_count_miss(PCONTEXT, HookCtx*);
-void __fastcall th10_tracker_count_bomb(PCONTEXT, HookCtx*);
-void __fastcall th13_tracker_count_trance(PCONTEXT, HookCtx*);
-void __fastcall tracker_reset(PCONTEXT, HookCtx*);
+void TH_CALLBACK_CC th10_tracker_count_miss(PCONTEXT, HookCtx*);
+void TH_CALLBACK_CC th10_tracker_count_bomb(PCONTEXT, HookCtx*);
+void TH_CALLBACK_CC th13_tracker_count_trance(PCONTEXT, HookCtx*);
+void TH_CALLBACK_CC tracker_reset(PCONTEXT, HookCtx*);
 
 #pragma endregion
 

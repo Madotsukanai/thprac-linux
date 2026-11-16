@@ -37,11 +37,14 @@
 // a full rebuild of that code, however, developers will not need to binhack
 // thprac.exe every time they compile
 
-#ifndef _DEBUG
+#if !defined(_DEBUG) && defined(_MSC_VER)
 extern "C" {
 uint32_t* __vectorcall CPUHitInf_CheckColliders(void*, int, uint32_t*, float, float, float);
 bool __vectorcall _RxD1E00_fast(uint32_t, uint32_t, float, float, float, float, float, float, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 }
+#define TH19_HAS_FAST_OBJ 1
+#else
+#define TH19_HAS_FAST_OBJ 0
 #endif
 
 namespace THPrac {
@@ -914,13 +917,13 @@ namespace V1_10c {
             return;
         }
 
-        #ifndef _DEBUG
+        #if TH19_HAS_FAST_OBJ
         *(uintptr_t*)((uintptr_t)th19_patch_cpu_check_colliders.data.buffer.ptr + 1) = (uintptr_t)&CPUHitInf_CheckColliders - RVA((uintptr_t)th19_patch_cpu_check_colliders.addr + 5);
         *(uintptr_t*)((uintptr_t)th19_patch_RxD1E00.data.buffer.ptr + 1) = (uintptr_t)&_RxD1E00_fast - RVA((uintptr_t)th19_patch_RxD1E00.addr + 5);
 
         th19_patch_cpu_check_colliders.Setup();
         th19_patch_RxD1E00.Setup();
-        #endif
+#endif
 
         th19_vs_mode_disable_movement.Setup();
         th19_charsel_disable_movement.Setup();

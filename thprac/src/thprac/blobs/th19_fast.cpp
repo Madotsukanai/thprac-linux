@@ -18,12 +18,17 @@
 // Use the same Pi as ZUN
 constexpr const float M_PI = std::bit_cast<float, uint32_t>(0x40490FDB);
 
-#if __clang__
+#if defined(__clang__) && !defined(__MINGW32__)
 __m128 __vectorcall sincos(float x) asm("___libm_sse2_sincosf_");
-#elif _MSC_VER
+#elif defined(_MSC_VER)
 extern "C" __m128 __cdecl __libm_sse2_sincosf_(float x);
-static __forceinline __m128 __vectorcall sincos(float x) {
+static inline __m128 __vectorcall sincos(float x) {
     return ((__m128(__vectorcall*)(float))&__libm_sse2_sincosf_)(x);
+}
+#elif defined(__MINGW32__)
+extern "C" __m128 __cdecl __libm_sse2_sincosf_(float x);
+static inline __m128 sincos(float x) {
+    return __libm_sse2_sincosf_(x);
 }
 #endif
 
@@ -99,7 +104,7 @@ inline bool line_segments_intersect_2d(
     return 0;
 }
 template<typename T>
-T __forceinline square(T val) {
+T inline square(T val) {
     return val * val;
 }
 
@@ -222,7 +227,7 @@ inline float angle_normalize(float angle)
     return angle;
 }
 
-__forceinline bool _RxD1E00_fast_impl (
+inline bool _RxD1E00_fast_impl (
     int a1,
     float a2, float a3, float a4, float a5,
     float a6, float a7, float a8, float a9,

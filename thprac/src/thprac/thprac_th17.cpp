@@ -4,7 +4,7 @@
 
 namespace THPrac {
 namespace TH17 {
-    struct __declspec(align(4)) GlobalsReplay {
+    struct alignas(4) GlobalsReplay {
         int32_t stage;
         int32_t stage_start;
         int32_t chapter;
