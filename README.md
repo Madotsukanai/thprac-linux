@@ -1,4 +1,4 @@
-# thprac-th06nc (Linux / Wine 向けビルド)
+# thprac-th06nc (Wine/Proton向けビルド)
 
 [thprac](https://github.com/touhouworldcup/thprac) の非公式フォーク [thprac-th06nc](https://github.com/zxxsmart/thprac-th06nc) を、**Linux 上でビルドし、Wine / Proton で動かす**ための移植版です。
 
