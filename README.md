@@ -2,7 +2,7 @@
 
 [thprac](https://github.com/touhouworldcup/thprac) の非公式フォーク [zxxsmart/thprac-th06nc](https://github.com/zxxsmart/thprac-th06nc) に、以下のローカル変更を加え、**Linux (MinGW-w64 クロスコンパイル) でビルドして Steam の Proton で動かす**ためのリポジトリです。。
 
-絶対にthpracをProtonではなくWineから起動して下さい。Protonで起動するとゲームプロセスにthpracをフックさせる事ができません。
+絶対にthpracをProtonではなく**Wineから起動して下さい。**Protonで起動するとゲームプロセスにthpracをフックさせる事ができません。
 
 ## 必要なもの (ビルド)
 
