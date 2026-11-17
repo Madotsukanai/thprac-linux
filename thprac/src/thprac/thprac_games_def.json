@@ -244,6 +244,11 @@
         "The instance name and command must not be empty.",
         "インスタンス名と起動コマンドは空にできません。"
       ],
+      "THPRAC_GAMES_COMMAND_STEAM_HINT": [
+        "通过 Proton 启动 Steam 的非 Steam 游戏（快捷方式）时，请直接粘贴 Steam「创建桌面快捷方式」生成的 .desktop 文件中 Exec= 后面的命令（如 steam steam://rungameid/11100548606694785024）。启动选项（gamescope 等）由 Steam 自动套用；直接使用 shortcuts.vdf 里的 AppID 可能无法启动。",
+        "To start a Steam non-Steam game (shortcut) under Proton, paste the command after Exec= in the .desktop file created by Steam's \"Create Desktop Shortcut\" (e.g. steam steam://rungameid/11100548606694785024). Launch options (gamescope, etc.) are applied by Steam; the AppID from shortcuts.vdf alone may not launch.",
+        "ProtonでSteamの非Steamゲーム（ショートカット）を起動する場合は、Steamの「デスクトップショートカットを作成」で生成される .desktop ファイルの Exec= 以降のコマンド（例: steam steam://rungameid/11100548606694785024）をそのまま貼り付けてください。起動オプション（gamescopeなど）はSteam側で自動的に適用されます。shortcuts.vdf 内の AppID を直接指定すると起動しないことがあります。"
+      ],
       "THPRAC_UPDATE_CHECK": [ "检查更新", "Check for updates", "更新を確認" ],
       "THPRAC_UPDATE_CHECKING": [ "正在检查更新…", "Checking for updates…", "更新を確認中…" ],
       "THPRAC_UPDATE_AVAILABLE": [ "发现新版本 %s", "New version available: %s", "新しいバージョンがあります: %s" ],

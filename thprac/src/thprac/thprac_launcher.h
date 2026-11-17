@@ -209,6 +209,7 @@ struct LauncherState {
     char instCmdBuf[1024] = {};
     bool instCmdWarn = false;
     LauncherGame* pendingAddCommandGame = nullptr;  // open the add-command modal from the game list context menu
+    bool addCommandModalOpened = false;             // OpenPopup was issued for the pending modal (prevents reopen-after-close)
     union {
         bool choices[ALL_GAMES_LEN] = {};
         struct {

@@ -14,6 +14,7 @@ inline uintptr_t MenuTransition=0x4da80;
 inline uintptr_t PlayBgm=0x7bc80;
 inline uintptr_t StopSound=0xcce50;
 inline uintptr_t PlaySound=0xc8110;
+inline uintptr_t SoundTable=0;
 inline uintptr_t BgmHandle=0x50966c;
 inline uintptr_t BgmLoop=0x50967d;
 inline uintptr_t WriteFile=0x39610;
@@ -94,6 +95,7 @@ inline void UseSteam25306795() {
     PlayBgm=0x7d8d0;
     StopSound=0xceb30;
     PlaySound=0xc9df0;
+    SoundTable=0x7e2b60;
     BgmHandle=0x5542bc;
     BgmLoop=0x5542cd;
     WriteFile=0x3aea0;

@@ -1,32 +1,8 @@
-# thprac-th06nc (Linux / Wine・Proton 向けローカルビルド)
+# thprac-linux
 
 [thprac](https://github.com/touhouworldcup/thprac) の非公式フォーク [zxxsmart/thprac-th06nc](https://github.com/zxxsmart/thprac-th06nc) に、以下のローカル変更を加え、**Linux (MinGW-w64 クロスコンパイル) でビルドして Steam の Proton で動かす**ためのリポジトリです。。
 
-動作中のゲームにフックするためにはWineから起動する必要があります。（Protonではprefixを合わせないと不可）
-
-## ローカル変更 (アップストリームとの差分)
-
-### 1. 追加スペルカードの BGM 修正 (`thprac/src/thprac/th06nc/runtime.cpp`)
-
-Extra Phantomのスペルカードをプラクティスメニューから選んだ際、BGMがExtraのままになっていたのを、正しい曲に修正しています。
-
-- 対象: `呪弾「フラジャイルウィング」` / `呪弾「這い寄る血痕」` / `「弾幕の心臓」` (sections.h の `FragileWing=71`〜`DanmakuHeart=73`)
-
-### 2. ゲームの直接起動 (Steam ライブラリ解決)
-
-ランチャーのゲームリストから th06nc を起動すると、Proton/Wine 環境では `steam://rungameid/4659620` が解決できずフリーズ (60 秒待ち → 失敗) する問題を修正しています。
-
-- ブリッジが Linux 側 Steam の情報から **th06nc.exe のインストール場所を解決し、直接 `CreateProcess` で起動**します。
-- 解決順:
-  1. `STEAM_COMPAT_DATA_PATH` / `WINEPREFIX` の `compatdata/4659620` からライブラリを特定 (自プレフィックスと確認できた場合のみ直接起動)
-  2. `HOME` 配下の Steam (`~/.local/share/Steam`, `~/.steam/steam`, Flatpak 版) の `steamapps/common/th06nc/`
-  3. `libraryfolders.vdf` から AppID 4659620 のライブラリを検索
-  4. `Z:\home\*` のワイルドカード走査
-- 解決できない場合は従来どおり `steam://` にフォールバックします。
-
-### 3. デバッグログ (暫定)
-
-`thprac-th06nc.log` への診断ログ (`[dll] diag ...`) が残っています。動作確認が済んだら削除推奨 (`runtime.cpp` の `rlog`/`rlogw` 呼び出し)。
+絶対にthpracをProtonではなくWineから起動して下さい。Protonで起動するとゲームプロセスにthpracをフックさせる事ができません。
 
 ## 必要なもの (ビルド)
 

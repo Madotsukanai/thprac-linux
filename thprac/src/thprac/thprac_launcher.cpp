@@ -289,7 +289,7 @@ static void LauncherSettingsMain(LauncherState* state) {
     ImGui::NewLine();
     ImGui::TextUnformatted(S(TH_ABOUT_THPRAC));
     ImGui::Separator();
-    ImGui::Text("thprac-linux v%s", THPRAC_FORK_VERSION);
+    ImGui::Text("thprac-linux v%s / thprac-th06nc %s", THPRAC_FORK_VERSION, THPRAC_NC_VERSION);
     ImGui::TextUnformatted(S(TH06NC_UNOFFICIAL));
     ImGui::Text(S(TH06NC_UPSTREAM_VERSION), VER_PARAMS_CUR);
     if (ImGui::Button(S(TH06NC_PROJECT_PAGE))) {

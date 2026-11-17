@@ -15,9 +15,89 @@
             SetStyle(ImGuiStyleVar_WindowRounding, 0.0f);
             SetStyle(ImGuiStyleVar_WindowBorderSize, 0.0f);
             OnLocaleChange();
+            LoadPersisted();
         }
 
     public:
+
+        // Practice selections survive menu reopens and game restarts. The
+        // values are written when a run is confirmed and restored on startup.
+        struct Persisted {
+            uint32_t magic;
+            uint32_t version;
+            int32_t mode, stage, warp, chapter, phase, frame, section;
+            int32_t dlg, customRank, fakeShot;
+            int32_t life, bomb, power, graze, point, rank;
+            int64_t score;
+            int32_t difficulty, shotType;
+        };
+        static constexpr uint32_t kPersistMagic = 0x53504336;
+        static constexpr uint32_t kPersistVersion = 3;
+
+        void SavePersisted()
+        {
+            Persisted p {};
+            p.magic = kPersistMagic;
+            p.version = kPersistVersion;
+            p.mode = *mMode;
+            p.stage = *mStage;
+            p.warp = *mWarp;
+            p.chapter = *mChapter;
+            p.phase = *mPhase;
+            p.frame = *mFrame;
+            p.section = *mSection;
+            p.dlg = *mDlg;
+            p.customRank = *mCustomRank;
+            p.fakeShot = *mFakeShot;
+            p.life = *mLife;
+            p.bomb = *mBomb;
+            p.power = *mPower;
+            p.graze = *mGraze;
+            p.point = *mPoint;
+            p.rank = *mRank;
+            p.score = *mScore;
+            p.difficulty = mDiffculty;
+            p.shotType = mShotType;
+            FILE* f = fopen("thprac-linux.prac", "wb");
+            if (f) {
+                fwrite(&p, sizeof(p), 1, f);
+                fclose(f);
+            }
+        }
+
+        void LoadPersisted()
+        {
+            FILE* f = fopen("thprac-linux.prac", "rb");
+            if (!f) return;
+            Persisted p {};
+            bool ok = fread(&p, sizeof(p), 1, f) == 1;
+            fclose(f);
+            if (!ok || p.magic != kPersistMagic || p.version != kPersistVersion) return;
+            *mMode = p.mode;
+            *mStage = p.stage;
+            *mWarp = p.warp;
+            *mPhase = p.phase;
+            *mFrame = p.frame;
+            *mSection = p.section;
+            *mDlg = p.dlg != 0;
+            *mCustomRank = p.customRank != 0;
+            *mFakeShot = p.fakeShot;
+            *mLife = p.life;
+            *mBomb = p.bomb;
+            *mPower = p.power;
+            *mGraze = p.graze;
+            *mPoint = p.point;
+            *mRank = p.rank;
+            *mScore = p.score;
+            mDiffculty = p.difficulty;
+            mShotType = p.shotType;
+            if (p.stage >= 0 && p.stage < 7) {
+                int maxChapter = mChapterSetup[p.stage][0] + mChapterSetup[p.stage][1];
+                *mChapter = p.chapter < 1 ? 1 : (p.chapter > maxChapter ? maxChapter : p.chapter);
+            } else {
+                *mChapter = 1;
+            }
+        }
 
         TH_NOINLINE void State(int state)
         {
@@ -27,9 +107,10 @@
             case 1:
                 SetFade(0.8f, 0.1f);
                 Open();
-                if (*mStage != MenuStage() || mDiffculty != std::clamp(MenuDifficulty(),0,3) || mShotType != MenuShot())
-                    *mSection = *mChapter = *mPhase = *mFrame = 0;
-                *mStage = MenuStage();
+                // Keep every previous selection, including the stage: the GUI's
+                // stage combo is what the module applies on start (the game's
+                // own menu pick is overridden in GameInit), so nothing is
+                // forced here and reopens show exactly the last confirmed set.
                 mDiffculty = std::clamp(MenuDifficulty(),0,3);
                 mShotType = MenuShot();
                 break;
@@ -63,6 +144,7 @@
                 thPracParam.customRank = *mCustomRank;
                 if (thPracParam.section >= TH06_ST4_BOSS1 && thPracParam.section <= TH06_ST4_BOSS7)
                     thPracParam.fakeType = *mFakeShot;
+                SavePersisted();
                 break;
             case 4:
                 Close();

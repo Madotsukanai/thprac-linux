@@ -17,7 +17,10 @@ struct SectionMenu {
     int count = 0;
 
     void Normalize(int& selection, const char* const* names) const {
-        if (selection < 0 || selection >= count) selection = 0;
+        // Keep the selection as close as possible instead of jumping back to
+        // the first entry (e.g. the first spell card) when the stage changed.
+        if (selection < 0) selection = 0;
+        else if (selection >= count && count > 0) selection = count - 1;
         for (int n = 0; n < count; ++n) {
             const auto* name = names[labels[selection]];
             if (name && *name) return;

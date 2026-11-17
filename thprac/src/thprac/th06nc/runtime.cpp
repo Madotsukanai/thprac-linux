@@ -26,6 +26,7 @@ bool retryPending=false, speedOwned=false;
 double originalFps=60.0;
 bool initializingPractice{}, practicePaused{};
 int pausedBgm=-1;
+GameBuild gGameBuild=GameBuild::Unsupported;
 int selectedDifficulty{};
 using PlayBgm= int64_t(*)(void*,const char*); PlayBgm originalBgm{};
 void* practiceMenu{};int practiceTransitionMode{};bool confirmNativePractice{};
@@ -419,13 +420,39 @@ const char* addedSpellBgmPath(const char* path) {
     number[5]='1';number[6]='6';
     return buffer;
 }
-int64_t playBgm(void* supervisor,const char* path) {
+// The added spells play th06_16, whose ~12 s orchestral lead-in drags in spell
+// practice. Right after the game starts the fresh stream, rewind its cursor
+// fields to 11.9 s and let it resume there, mirroring the pause/resume path.
+// Streaming-sound cursor fields hold decoded PCM bytes: 48 kHz / 16-bit /
+// stereo => 192000 B/s; 11.9 s lands exactly on a 20 ms opus frame boundary.
+constexpr double kAddedSpellBgmStart=11.9;
+constexpr int64_t kBgmBytesPerSec=192000;
+void restartAddedSpellBgm() {
+    int handle=mem<int>(Rva::BgmHandle);
+    if(handle==-1||!Rva::SoundTable)return;
+    void** table=*reinterpret_cast<void***>(base+Rva::SoundTable);
+    if(!table)return;
+    auto sound=static_cast<uint8_t*>(table[handle & 0x3ffff]);
+    if(!sound)return;
+    int64_t offset=static_cast<int64_t>(kAddedSpellBgmStart*kBgmBytesPerSec);
+    *reinterpret_cast<int64_t*>(sound+0x2c38)=offset;
+    *reinterpret_cast<int64_t*>(sound+0x2c50)=offset;
+    *reinterpret_cast<uint8_t*>(sound+0x2c5c)=0;
+    *reinterpret_cast<uint16_t*>(sound+0x2c5e)=0;
+    *reinterpret_cast<int*>(sound+0x2c68)=0;
+    reinterpret_cast<int(*)(int,int)>(base+Rva::StopSound)(handle,0);
+    reinterpret_cast<int(*)(int,int,int)>(base+Rva::PlaySound)(handle,mem<uint8_t>(Rva::BgmLoop)?3:1,0);
+    rlog("th06_16 bgm seeked to 11.9s");
+}int64_t playBgm(void* supervisor,const char* path) {
+    bool addedSpell=initializingPractice && bossBgm(config) && addedSpellBgm(config);
     if(initializingPractice && bossBgm(config)) {
         auto stageData=mem<uintptr_t>(Rva::StageData);
         if(stageData)path=reinterpret_cast<const char*>(stageData+0x310);
-        if(addedSpellBgm(config))path=addedSpellBgmPath(path);
+        if(addedSpell)path=addedSpellBgmPath(path);
     }
-    return originalBgm(supervisor,path);
+    int64_t ret=originalBgm(supervisor,path);
+    if(addedSpell && gGameBuild==GameBuild::Steam25306795)restartAddedSpellBgm();
+    return ret;
 }
 int64_t menu(void* p) {
     static int diagPage=-9999;
@@ -515,6 +542,7 @@ DWORD WINAPI start(void*) {
     rlog(build==GameBuild::Unsupported?"build unsupported":build==GameBuild::Steam25306795?"build steam":"build original");
     if(build==GameBuild::Unsupported) {status.error=1;message(L"游戏版本不匹配：当前 EXE 尚未适配");sync();return 3;}
     if(build==GameBuild::Steam25306795)Rva::UseSteam25306795();
+    gGameBuild=build;
     rlog("mh init"); 
     if(MH_Initialize()!=MH_OK) {status.error=2;message(L"初始化钩子失败");sync();rlog("mh init fail");return 4;}
     rlog("mh init ok");

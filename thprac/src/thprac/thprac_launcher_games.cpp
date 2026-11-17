@@ -715,6 +715,7 @@ static bool RenderAddCommandModal(LauncherState* state, LauncherGame* game) {
         ImGui::InputText(S(THPRAC_GAMES_COMMAND_CMD_LABEL), state->instCmdBuf, sizeof(state->instCmdBuf) - 1);
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
         ImGui::TextUnformatted(S(THPRAC_GAMES_COMMAND_DESC));
+        ImGui::TextUnformatted(S(THPRAC_GAMES_COMMAND_STEAM_HINT));
         ImGui::PopTextWrapPos();
         if (state->instCmdWarn) {
             ImGui::TextUnformatted(S(THPRAC_GAMES_COMMAND_EMPTY));
@@ -1960,13 +1961,16 @@ void LauncherGamesMain(LauncherState* state) {
 
     // The right-click menu deferred a launch-command instance modal here.
     if (state->pendingAddCommandGame) {
-        // Only open it once: reopening every frame would resurrect the modal
-        // even after the user closes it (cancel/OK).
-        if (!ImGui::IsPopupOpen(S(THPRAC_GAMES_ADD_COMMAND_MODAL))) {
+        if (!state->addCommandModalOpened) {
+            // Open exactly once. OpenPopup on later frames would resurrect the
+            // dialog right after the user closed it, because CloseCurrentPopup
+            // removes the popup within the same frame it is clicked.
+            state->addCommandModalOpened = true;
             ImGui::OpenPopup(S(THPRAC_GAMES_ADD_COMMAND_MODAL));
         }
         if (!RenderAddCommandModal(state, state->pendingAddCommandGame)) {
             state->pendingAddCommandGame = nullptr;
+            state->addCommandModalOpened = false;
         }
     }
 
