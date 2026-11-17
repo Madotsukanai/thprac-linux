@@ -1,11 +1,15 @@
 #pragma once
 #include <windows.h>
 #include <bcrypt.h>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
+#include <array>
 #include <algorithm>
-#include "sections.h"
+#include <dxgi.h>
+
 #if defined(_MSC_VER)
 #define TH_NOINLINE __declspec(noinline)
 #else
@@ -25,6 +29,14 @@ inline size_t strnlen_s(const char* s, size_t maxsize) { if(!s) return 0; size_t
 #define _stricmp strcasecmp
 #endif
 
+namespace THPrac::TH06NC {
+// Append NC-only IDs so existing TH06 selections and saved replays stay stable.
+inline constexpr int FragileWing=71, CreepingBloodstain=72, DanmakuHeart=73;
+inline constexpr std::array<int,7> PortionCounts={6,4,7,9,5,2,7};
+inline constexpr bool IsAddedSpell(int section) {
+    return section>=FragileWing && section<=DanmakuHeart;
+}
+}
 
 constexpr uint32_t Magic = 0x4e435031, Protocol = 10, ReplayProtocol = 7;
 constexpr wchar_t ExpectedHash[] = L"07850c8c6e469c0e82c13423e6d0d096a88d693455bdacacbb44c0aa3bcce473";
@@ -66,25 +78,36 @@ inline std::wstring executablePath(HMODULE module=nullptr) {
     std::wstring s(32768,L'\0'); auto n=GetModuleFileNameW(module,s.data(),DWORD(s.size())); s.resize(n); return s;
 }
 inline std::wstring directory(const std::wstring& p) { return p.substr(0,p.find_last_of(L"\\/")); }
-inline void _thlog(const char* msg,unsigned v=0){FILE* f=fopen("thprac-linux.log","ab");if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}}
+constexpr wchar_t DiagLogName[] = L"thprac-linux.log";
+inline bool DiagEnabled() {
+    static bool on = [] { wchar_t v[8]; return GetEnvironmentVariableW(L"TH06NC_TRACE", v, 8) > 0; }();
+    return on;
+}
+inline void DiagWriteLine(const wchar_t* path, const char* text) {
+    if (!DiagEnabled()) return;
+    FILE* f = _wfopen(path, L"ab");
+    if (f) { fputs("[dll] ", f); fputs(text, f); fputc('\n', f); fclose(f); }
+}
+inline void DiagLog(const char* msg) { DiagWriteLine(DiagLogName, msg); }
+inline void DiagLogf(const char* fmt, ...) {
+    char line[512];
+    va_list args; va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    DiagLog(line);
+}
 inline GameBuild identifyBuild(const std::wstring& path) {
-    _thlog("identify open ",0);
     HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
-    if(file==INVALID_HANDLE_VALUE) {_thlog("identify open fail ",GetLastError()); return GameBuild::Unsupported;}
+    if(file==INVALID_HANDLE_VALUE) {DiagLogf("identify open fail err=%lu",GetLastError()); return GameBuild::Unsupported;}
     BCRYPT_ALG_HANDLE algorithm{}; BCRYPT_HASH_HANDLE hash{}; GameBuild build=GameBuild::Unsupported;
     NTSTATUS st=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0);
-    _thlog("bcrypt open st=", (unsigned)(st&0xffffffff));
     if(st>=0) st=BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0);
-    _thlog("bcrypt create st=", (unsigned)(st&0xffffffff));
     if(algorithm && hash) {
-        std::vector<unsigned char> buffer(65536); DWORD n=0; bool readOk=true; unsigned chunks=0;
-        while(true) { if(!ReadFile(file,buffer.data(),DWORD(buffer.size()),&n,nullptr)) {readOk=false;_thlog("read fail ",GetLastError());break;}
-          if(!n) break; st=BCryptHashData(hash,buffer.data(),n,0); if(st<0){readOk=false;_thlog("hash data st=",(unsigned)(st&0xffffffff));break;}
-          if((++chunks % 512)==0) _thlog("hashed chunks=",chunks);
+        std::vector<unsigned char> buffer(65536); DWORD n=0; bool readOk=true;
+        while(true) { if(!ReadFile(file,buffer.data(),DWORD(buffer.size()),&n,nullptr)) {readOk=false;DiagLogf("identify read fail err=%lu",GetLastError());break;}
+          if(!n) break; st=BCryptHashData(hash,buffer.data(),n,0); if(st<0){readOk=false;DiagLogf("identify hash fail st=%ld",(long)st);break;}
         }
-        _thlog("read done chunks=",chunks);
         unsigned char digest[32]{}; if(readOk) st=BCryptFinishHash(hash,digest,32,0); else st=-1;
-        _thlog("finish st=",(unsigned)(st&0xffffffff));
         if(readOk && st>=0) {
           std::wstring value; const wchar_t* hex=L"0123456789abcdef";
           for(auto c:digest){value+=hex[c>>4];value+=hex[c&15];}
@@ -93,7 +116,7 @@ inline GameBuild identifyBuild(const std::wstring& path) {
         }
     }
     if(hash)BCryptDestroyHash(hash); if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0); CloseHandle(file);
-    _thlog("identify done ", (unsigned)build);
+    DiagLogf("identify done build=%u",(unsigned)build);
     return build;
 }
 inline bool supportedFile(const std::wstring& path) { return identifyBuild(path)!=GameBuild::Unsupported; }
@@ -109,4 +132,15 @@ inline bool valid(const Settings& s) {
       s.point>=0&&s.point<=65535 && s.rank>=0&&s.rank<=99 && s.score<=9999999990ULL &&
       s.fakeShot>=-1&&s.fakeShot<=3 && s.fps>=30&&s.fps<=240 && s.phase>=0&&s.phase<=1 &&
       (s.flags&~255u)==0 && (s.dialogue==0||s.dialogue==1) && (s.enabled==0||s.enabled==1);
+}
+
+namespace THPrac::TH06NC {
+using PresentCallback = HRESULT (STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+// Display state is separate from Settings and is never written into replays.
+enum class DisplayState : int { Off, Pending, Active, Unavailable };
+bool InstallLowLatency(void* resizeBuffersEntry);
+void LowLatencyBeforeFrame();
+HRESULT LowLatencyPresent(IDXGISwapChain* swap, UINT interval, UINT flags, PresentCallback original);
+DisplayState LowLatencyState();
+uint32_t LowLatencyError();
 }

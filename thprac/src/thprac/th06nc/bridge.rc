@@ -1,4 +1,0 @@
-#include "bridge_resource.h"
-IDR_FREETYPE_DLL RCDATA "FREETYPE_DLL_PATH"
-IDR_MODULE_DLL   RCDATA "MODULE_DLL_PATH"
-1 24 "bridge.manifest"

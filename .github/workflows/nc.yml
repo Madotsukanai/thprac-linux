@@ -1,4 +1,4 @@
-name: Build thprac-th06nc
+name: Build thprac-linux
 on:
   workflow_dispatch:
 permissions:
@@ -17,9 +17,9 @@ jobs:
       - name: Upload single executable
         uses: actions/upload-artifact@v4
         with:
-          name: thprac-th06nc
+          name: thprac-linux
           path: |
-            build/single/thprac-th06nc.exe
+            build/single/thprac-linux.exe
             LICENCE
             THIRD_PARTY_NOTICES.txt
           if-no-files-found: error

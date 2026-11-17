@@ -240,7 +240,7 @@ bool ParseLatestRelease(const std::string& json, std::string& version, std::stri
         if (!name || !download) continue;
         size_t len = strlen(name);
         if (len >= 4 && _stricmp(name + len - 4, ".exe") == 0) {
-            if (!_stricmp(name, "thprac-linux.exe") || !_stricmp(name, "thprac-th06nc.exe")) {
+            if (!_stricmp(name, "thprac-linux.exe")) {
                 url = download;
                 break;
             }

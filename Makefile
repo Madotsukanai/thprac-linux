@@ -17,8 +17,6 @@ LOCALE_DEF_C := thprac/src/thprac/thprac_locale_def.cpp
 LOC_JSON_SRC := thprac/loc_json.cpp thprac/src/3rdParties/yyjson/yyjson.c
 LOC_JSON_EXE := $(BUILD_DIR)/loc_json.exe
 STAMP_NC     := $(BUILD_DIR)/.built
-BRIDGE_RES   := $(BUILD_DIR)/bridge.res
-
 BIN_DLL    := $(BUILD_DIR)/bin/libthprac_th06nc.dll
 BIN_FT     := $(BUILD_DIR)/bin/freetype.dll
 BIN_BRIDGE := $(BUILD_DIR)/bin/thprac_bridge64.exe
@@ -64,10 +62,6 @@ $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE): nc
 $(DIST_DIR):
 	mkdir -p $(DIST_DIR)
 
-$(BRIDGE_RES): thprac/src/thprac/th06nc/bridge.rc thprac/src/thprac/th06nc/bridge_resource.h thprac/src/thprac/th06nc/bridge.manifest $(BIN_DLL) $(BIN_FT) | $(BUILD_DIR)
-	sed -e 's|FREETYPE_DLL_PATH|$(abspath $(BIN_FT))|g' -e 's|MODULE_DLL_PATH|$(abspath $(BIN_DLL))|g' thprac/src/thprac/th06nc/bridge.rc > $(BUILD_DIR)/bridge_gen.rc
-	$(WINDRES64) -Ithprac/src/thprac/th06nc $(BUILD_DIR)/bridge_gen.rc -O coff -o $@
-
 # --- Win32 launcher (integrated) ---
 LAUNCHER_SRCS := $(shell cat tools/launcher_srcs.txt)
 LAUNCHER_INCLUDES := -Ithprac/src -Ithprac/src/thprac -Ithprac/src/3rdParties -Ithprac/src/3rdParties/ImGui -Ithprac/src/3rdParties/FreeType/include -Ithprac/src/3rdParties/yyjson -Ithprac/src/3rdParties/MetroHash -Ithprac/src/3rdParties/MinHook/include -Ithprac/src/3rdParties/d3d8/include
@@ -112,12 +106,12 @@ $(FT32_LIB): $(TOOLCHAIN32) | $(LAUNCHER_BUILD)
 
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) README_NC.md LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
 	cp $(BIN_FT) $(LAUNCHER_BUILD)/payload/freetype.dll
 	cp $(BIN_BRIDGE) $(LAUNCHER_BUILD)/payload/thprac_bridge64.exe
-	cp README_NC.md LICENCE THIRD_PARTY_NOTICES.txt $(LAUNCHER_BUILD)/payload/
+	cp LICENCE THIRD_PARTY_NOTICES.txt $(LAUNCHER_BUILD)/payload/
 	cp thprac/src/3rdParties/FreeType/LICENSE.TXT $(LAUNCHER_BUILD)/payload/licenses/FreeType-LICENSE.txt
 	cp thprac/src/3rdParties/FreeType/FTL.TXT $(LAUNCHER_BUILD)/payload/licenses/FreeType-FTL.txt
 	cp thprac/src/3rdParties/MinHook/LICENSE.txt $(LAUNCHER_BUILD)/payload/licenses/MinHook.txt

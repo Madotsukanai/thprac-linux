@@ -289,9 +289,11 @@ static void LauncherSettingsMain(LauncherState* state) {
     ImGui::NewLine();
     ImGui::TextUnformatted(S(TH_ABOUT_THPRAC));
     ImGui::Separator();
-    ImGui::Text("thprac-linux v%s / thprac-th06nc %s", THPRAC_FORK_VERSION, THPRAC_NC_VERSION);
+    ImGui::Text("thprac-linux v%s", THPRAC_FORK_VERSION);
     ImGui::TextUnformatted(S(TH06NC_UNOFFICIAL));
     ImGui::Text(S(TH06NC_UPSTREAM_VERSION), VER_PARAMS_CUR);
+    ImGui::SameLine();
+    ImGui::Text(" / thprac-th06nc %s", THPRAC_NC_VERSION);
     if (ImGui::Button(S(TH06NC_PROJECT_PAGE))) {
         ShellExecuteA(Gui::ImplWin32GetHwnd(), "open", THPRAC_FORK_REPOSITORY, nullptr, nullptr, SW_SHOW);
     }

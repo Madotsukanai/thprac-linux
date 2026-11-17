@@ -12,7 +12,7 @@ set(core "${CMAKE_CURRENT_SOURCE_DIR}/thprac/src/thprac")
 set(vendor "${CMAKE_CURRENT_SOURCE_DIR}/thprac/src/3rdParties")
 add_subdirectory("${vendor}/MinHook")
 add_library(thprac_th06nc SHARED
-  ${core}/th06nc/runtime.cpp ${core}/th06nc/overlay.cpp ${core}/th06nc/ecl.cpp ${core}/th06nc/presentation.cpp
+  ${core}/thprac_th06nc.cpp
   ${core}/thprac_gui_components.cpp ${core}/thprac_gui_input.cpp
   ${core}/thprac_gui_locale.cpp ${core}/thprac_gui_impl_win32.cpp
   ${core}/thprac_locale_def.cpp
@@ -34,8 +34,8 @@ if(MSVC)
 else()
   target_link_libraries(thprac_th06nc PRIVATE minhook "${FREETYPE_DLL}" d3d11 dxgi d3dcompiler bcrypt user32 gdi32 imm32)
 endif()
-add_executable(thprac_bridge64 WIN32 ${core}/th06nc/bridge.cpp)
-target_compile_definitions(thprac_bridge64 PRIVATE NOMINMAX UNICODE _UNICODE)
+add_executable(thprac_bridge64 WIN32 ${core}/thprac_th06nc.cpp)
+target_compile_definitions(thprac_bridge64 PRIVATE NOMINMAX UNICODE _UNICODE THPRAC_TH06NC_BRIDGE)
 if(MSVC)
   target_compile_options(thprac_bridge64 PRIVATE /utf-8 /EHsc)
 else()

@@ -1,6 +1,6 @@
-thprac-th06nc v1.0.0 - Third-party notices
+thprac-linux - Third-party notices
 
-Unofficial thprac fork with New Classic practice support.
+Unofficial thprac-linux fork with practice support for TH06 New Classic (NC).
 Upstream: https://github.com/touhouworldcup/thprac
 Original copyright and license notices remain applicable.
 Game names and spell names identify the supported game; their rights belong to

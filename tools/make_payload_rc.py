@@ -5,7 +5,7 @@ from pathlib import Path
 
 FILES = [
     'thprac_bridge64.exe', 'thprac_th06nc.dll', 'freetype.dll',
-    'README_NC.md', 'LICENCE',
+    'LICENCE',
     'licenses/FreeType-LICENSE.txt', 'licenses/FreeType-FTL.txt',
     'licenses/MinHook.txt', 'licenses/ImGui.txt',
     'THIRD_PARTY_NOTICES.txt',
