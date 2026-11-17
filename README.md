@@ -25,7 +25,7 @@ make nc    # 64bit モジュール (thprac_th06nc.dll) とブリッジのみ
 make       # 統合 exe まで (build/linux-x64/dist/thprac-th06nc.exe)
 ```
 
-成果物: `build/linux-x64/dist/thprac-th06nc.exe`
+成果物: `build/linux-x64/dist/thprac-linux.exe`<br>
 32bit FreeType は初回 `make` 時に自動ダウンロードして静的ビルドされます。`make clean` で `build/` を削除。
 
 ## ライセンスと謝辞
