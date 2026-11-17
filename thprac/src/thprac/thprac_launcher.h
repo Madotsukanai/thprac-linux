@@ -205,6 +205,10 @@ struct LauncherState {
     bool loadRescanNeeded = false;
     ScanCtx scanCtx;
     char instRenameBuf[256] = {};
+    char instCmdNameBuf[256] = {};
+    char instCmdBuf[1024] = {};
+    bool instCmdWarn = false;
+    LauncherGame* pendingAddCommandGame = nullptr;  // open the add-command modal from the game list context menu
     union {
         bool choices[ALL_GAMES_LEN] = {};
         struct {

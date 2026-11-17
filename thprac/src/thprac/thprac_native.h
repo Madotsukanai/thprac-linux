@@ -6,6 +6,25 @@
 #include "thprac_native_bundle.h"
 #include "thprac_gui_locale.h"
 namespace THPrac {
+// Run a host-side shell command from a Wine/Proton process (ntdll exports
+// wine_get_version there, and Z: is mapped to the container root). The
+// command is handed to /bin/sh -c, so pipes, redirections and env vars work.
+inline bool RunLaunchCommand(const wchar_t* command) {
+    std::wstring escaped;
+    for (auto c = command; *c; ++c) {
+        if (*c == L'"') {
+            escaped += L"\\\"";
+        } else {
+            escaped += *c;
+        }
+    }
+    std::wstring params = L"-c \"" + escaped + L"\"";
+    AttachLog("RunLaunchCommand len=%d", (int)escaped.size());
+    // ShellExecuteW resolves the Unix binary through the Z: drive mapping.
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"Z:\\bin\\sh", params.c_str(), nullptr, SW_HIDE);
+    AttachLog("RunLaunchCommand result=%d", (int)(INT_PTR)result);
+    return (INT_PTR)result > 32;
+}
 // Cross-bitness is handled by a companion built from this same source tree.
 inline bool LaunchTH06NC(bool practice, DWORD attachPid = 0, bool lowLatency = false) {
     if (!practice && !attachPid && !lowLatency)

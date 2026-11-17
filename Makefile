@@ -23,7 +23,7 @@ BIN_DLL    := $(BUILD_DIR)/bin/libthprac_th06nc.dll
 BIN_FT     := $(BUILD_DIR)/bin/freetype.dll
 BIN_BRIDGE := $(BUILD_DIR)/bin/thprac_bridge64.exe
 
-INTEGRATED_EXE := $(DIST_DIR)/thprac-th06nc.exe
+INTEGRATED_EXE := $(DIST_DIR)/thprac-linux.exe
 
 .PHONY: all clean
 .DEFAULT_GOAL := all
@@ -74,7 +74,7 @@ LAUNCHER_INCLUDES := -Ithprac/src -Ithprac/src/thprac -Ithprac/src/3rdParties -I
 LAUNCHER_DEFS := -DNOMINMAX -DUNICODE -D_UNICODE -DHAVE_SSE2 -D_CRT_SECURE_NO_WARNINGS -D_WINDOWS -DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -DDISTORM_LIGHT
 LAUNCHER_CXXFLAGS := -std=c++20 -municode -O2 -msse -msse2 -mfpmath=sse -finput-charset=UTF-8 -fexec-charset=UTF-8 -ffunction-sections -fdata-sections -Wno-unknown-pragmas -Wno-attributes -fms-extensions -fpermissive $(LAUNCHER_DEFS) $(LAUNCHER_INCLUDES)
 LAUNCHER_CFLAGS := -O2 -msse -msse2 -mfpmath=sse -finput-charset=UTF-8 -fexec-charset=UTF-8 -ffunction-sections -fdata-sections -Wno-unknown-pragmas $(LAUNCHER_DEFS) $(LAUNCHER_INCLUDES)
-LAUNCHER_LDFLAGS = -static -municode -Wl,--subsystem,windows -Wl,--gc-sections -static-libgcc -static-libstdc++ -L$(FT32_PREFIX)/lib -lfreetype -ld3d9 -lgdi32 -luser32 -lole32 -lcomdlg32 -lshell32 -ladvapi32 -lntdll -lpsapi -lversion -limm32 -lwinmm -ldbghelp -luuid -lsetupapi -Wl,-Bstatic -l:libwinpthread.a
+LAUNCHER_LDFLAGS = -static -municode -Wl,--subsystem,windows -Wl,--gc-sections -static-libgcc -static-libstdc++ -L$(FT32_PREFIX)/lib -lfreetype -ld3d9 -lgdi32 -luser32 -lole32 -lcomdlg32 -lshell32 -ladvapi32 -lwininet -lntdll -lpsapi -lversion -limm32 -lwinmm -ldbghelp -luuid -lsetupapi -Wl,-Bstatic -l:libwinpthread.a
 OBJDUMP32 ?= i686-w64-mingw32-objdump
 
 $(LAUNCHER_BUILD):

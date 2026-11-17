@@ -281,7 +281,7 @@ bool overlayLowLatency{};
 bool overlayInstalled{};
 void TryInstallPresentHook(IDXGISwapChain* swap) {
     if (overlayInstalled || !swap) return;
-    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-linux.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
     auto entry = (*reinterpret_cast<void***>(swap))[8];
     MH_STATUS st=MH_CreateHook(entry, reinterpret_cast<void*>(Present), reinterpret_cast<void**>(&originalPresent));
     if (st == MH_OK) {
@@ -304,7 +304,7 @@ HRESULT WINAPI HookedCreateDevice(IDXGIAdapter* a, D3D_DRIVER_TYPE b, HMODULE c,
 // of the DXGI implementation, so hooking it through a throwaway swap chain also
 // covers the game's own.
 bool InstallPresentHookFromDummy() {
-    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-linux.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
     rlogLocal("overlay: fallback dummy swap chain");
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc=DefWindowProcW; wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"ThpracNcDummyWindow";
@@ -330,7 +330,7 @@ bool InstallPresentHookFromDummy() {
 }
 bool InstallOverlay(bool lowLatency)
 {
-    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
+    auto rlogLocal=[](const char* msg){FILE* f=fopen("thprac-linux.log","ab"); if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}};
     rlogLocal("overlay: begin");
     overlayLowLatency = lowLatency;
     HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");

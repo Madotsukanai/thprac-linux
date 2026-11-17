@@ -66,7 +66,7 @@ inline std::wstring executablePath(HMODULE module=nullptr) {
     std::wstring s(32768,L'\0'); auto n=GetModuleFileNameW(module,s.data(),DWORD(s.size())); s.resize(n); return s;
 }
 inline std::wstring directory(const std::wstring& p) { return p.substr(0,p.find_last_of(L"\\/")); }
-inline void _thlog(const char* msg,unsigned v=0){FILE* f=fopen("thprac-th06nc.log","ab");if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}}
+inline void _thlog(const char* msg,unsigned v=0){FILE* f=fopen("thprac-linux.log","ab");if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}}
 inline GameBuild identifyBuild(const std::wstring& path) {
     _thlog("identify open ",0);
     HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr);

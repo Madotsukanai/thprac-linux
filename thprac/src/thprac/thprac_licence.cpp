@@ -8,8 +8,8 @@ namespace Gui {
     {
         if (ImGui::BeginTabBar("COPYING_TABS", ImGuiTabBarFlags_None)) {
             auto notices = NativeBundle::Read(NativeBundle::BundleId + 10);
-            if (notices.data && ImGui::BeginTabItem("thprac-th06nc")) {
-                ImGui::BeginChild("COPYING.thprac-th06nc");
+            if (notices.data && ImGui::BeginTabItem("thprac-linux")) {
+                ImGui::BeginChild("COPYING.thprac-linux");
                 const char* text = reinterpret_cast<const char*>(notices.data);
                 ImGui::TextUnformatted(text, text + notices.size);
                 ImGui::EndChild();

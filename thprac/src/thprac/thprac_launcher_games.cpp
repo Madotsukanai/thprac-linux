@@ -375,8 +375,23 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
     case LAUNCH_NOTHING:
         break;
     }
-    if (game == ID_TH06NC) return LaunchTH06NC(inst->apply_thprac, 0, inst->low_latency);
+    if (game == ID_TH06NC && inst->type != TYPE_COMMAND) return LaunchTH06NC(inst->apply_thprac, 0, inst->low_latency);
     if (inst->type != TYPE_THCRAP) {
+        if (inst->type == TYPE_COMMAND) {
+            // Run the user-registered launch command (Wine/Proton/Steam/...)
+            // and hook thprac into the game once its process shows up.
+            if (inst->apply_thprac) {
+                state->reflectiveLaunchID = game;
+            }
+            if (!RunLaunchCommand(utf8_to_utf16(inst->path).c_str())) {
+                if (inst->apply_thprac) {
+                    state->reflectiveLaunchID = ID_UNKNOWN;
+                }
+                log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_GAMES_COMMAND_FAILED));
+                return false;
+            }
+            return true;
+        }
         if (inst->type != TYPE_STEAM) {
             uint32_t flags = RUN_FLAG_SKIP_IDENTIFY;
             if (inst->allow_oilp) {
@@ -413,6 +428,7 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
     }
     LauncherInstance* instances = (LauncherInstance*)malloc(sizeof(LauncherInstance) * insts_len);
     size_t valid_insts_count = 0;
+    bool ncConvertedAny = false;
 
     yyjson_val* cur = unsafe_yyjson_get_first(insts);
     for (size_t i = 0; i < insts_len; i++, cur = unsafe_yyjson_get_next(cur)) {
@@ -420,7 +436,18 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
         if (!path) {
             continue;
         }
+        // Older th06nc configs launch through the steam:// URL handler, which
+        // cannot be resolved inside Wine/Proton. Migrate them to a command
+        // instance that opens the game through the Steam client instead.
+        std::string ncSteamCmd;
+        bool ncConverted = false;
+        if (game->id == ID_TH06NC && strncmp(path, "steam://", 8) == 0) {
+            ncSteamCmd = std::string("steam ") + path;
+            path = ncSteamCmd.c_str();
+            ncConverted = true;
+        }
         path = _strdup(path);
+        if (ncConverted) ncConvertedAny = true;
         const char* name = yyjson_get_str(yyjson_obj_get(cur, "name"));
         if (name) {
             name = _strdup(name);
@@ -430,14 +457,17 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
         unsigned int type = TYPE_ERROR;
         yyjson_eval_numeric(yyjson_obj_get(cur, "type"), &type);
 
-        if (type > TYPE_UNKNOWN) {
+        if (type > TYPE_COMMAND) {
             type = TYPE_ERROR;
+        }
+        if (ncConverted && type == TYPE_STEAM) {
+            type = TYPE_COMMAND;
         }
 
         const THGameVersion* ver = nullptr;
         uint8_t ver_off = 0xFF;
 
-        if (type != TYPE_THCRAP) {
+        if (type != TYPE_THCRAP && type != TYPE_COMMAND) {
             if (!yyjson_eval_numeric(yyjson_obj_get(cur, "ver"), &ver_off)) {
                 state->loadRescanNeeded = true;
                 log_printf("Warning: instance %s has no version number...\r\n", path);
@@ -448,6 +478,10 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
                 ver_off = 0xFF;
             }
         } else {
+            ver_off = 0;
+        }
+        // Command instances have no executable to version-check.
+        if (type == TYPE_COMMAND && ver_off == 0xFF) {
             ver_off = 0;
         }
 
@@ -489,6 +523,10 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
     game->inst_count = valid_insts_count;
     game->instances = instances;
     yyjson_eval_numeric(yyjson_obj_get(json, "default_launch"), &game->default_launch);
+    // Make the migrated Steam command instance the default launch.
+    if (ncConvertedAny && game->default_launch == -1) {
+        game->default_launch = 0;
+    }
     if (game->id == ID_TH06NC) {
         yyjson_eval_numeric(yyjson_obj_get(json, "launch_options_seen"), &game->nc_launch_options_seen);
         // Older NC versions selected the Steam instance for direct launch
@@ -501,13 +539,13 @@ static void EnsureNCSteamInstance() {
     for (auto& game : games) if (game.id == ID_TH06NC && !game.instances) {
         auto* instance = static_cast<LauncherInstance*>(calloc(1, sizeof(LauncherInstance)));
         if (!instance) return;
-        instance->path = _strdup("steam://rungameid/4659620");
+        instance->path = _strdup("steam steam://rungameid/4659620");
         instance->name = _strdup("Steam - th06nc");
-        instance->type = TYPE_STEAM;
+        instance->type = TYPE_COMMAND;
         instance->apply_thprac = true;
         game.instances = instance;
         game.inst_count = 1;
-        game.default_launch = -1;
+        game.default_launch = 0;
     }
 }
 
@@ -646,6 +684,58 @@ static void DeleteGameInstance(LauncherGame* game, unsigned int inst_idx) {
     }
 }
 
+static void AddGameInstance(LauncherGame* game, const char* name, const char* path) {
+    auto* instances = (LauncherInstance*)malloc(sizeof(LauncherInstance) * (game->inst_count + 1));
+    if (!instances) {
+        return;
+    }
+    if (game->instances) {
+        memcpy(instances, game->instances, sizeof(LauncherInstance) * game->inst_count);
+        free(game->instances);
+    }
+    game->instances = instances;
+    auto* inst = &game->instances[game->inst_count];
+    memset(inst, 0, sizeof(*inst));
+    inst->path = _strdup(path);
+    inst->name = _strdup(name);
+    inst->type = TYPE_COMMAND;
+    inst->apply_thprac = true;
+    inst->allow_oilp = true;
+    inst->allow_vpatch = true;
+    game->selected = game->inst_count;
+    game->inst_count++;
+    SaveGamesJson();
+}
+
+// Name + shell command prompt for a new launch-command instance. Returns true
+// while the modal stays open.
+static bool RenderAddCommandModal(LauncherState* state, LauncherGame* game) {
+    if (Gui::Modal(S(THPRAC_GAMES_ADD_COMMAND_MODAL))) {
+        ImGui::InputText(S(THPRAC_GAMES_COMMAND_NAME_LABEL), state->instCmdNameBuf, sizeof(state->instCmdNameBuf) - 1);
+        ImGui::InputText(S(THPRAC_GAMES_COMMAND_CMD_LABEL), state->instCmdBuf, sizeof(state->instCmdBuf) - 1);
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::TextUnformatted(S(THPRAC_GAMES_COMMAND_DESC));
+        ImGui::PopTextWrapPos();
+        if (state->instCmdWarn) {
+            ImGui::TextUnformatted(S(THPRAC_GAMES_COMMAND_EMPTY));
+        }
+        switch (Gui::MultiButtonsFillWindow(0.0f, S(TH_OK), S(TH_CANCEL))) {
+        case 0: {
+            if (!state->instCmdNameBuf[0] || !state->instCmdBuf[0]) {
+                state->instCmdWarn = true;
+                break;
+            }
+            AddGameInstance(game, state->instCmdNameBuf, state->instCmdBuf);
+        }
+        case 1:
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+        return true;
+    }
+    return false;
+}
+
 static unsigned int CountAllInstances() {
     unsigned int ret = 0;    
     for (const auto& game : games) {
@@ -776,6 +866,14 @@ static bool DetailsPage(LauncherState* state) {
     }
     ImGui::SameLine();
 
+    if (ImGui::Button(S(THPRAC_GAMES_ADD_COMMAND))) {
+        memset(state->instCmdNameBuf, 0, sizeof(state->instCmdNameBuf));
+        memset(state->instCmdBuf, 0, sizeof(state->instCmdBuf));
+        state->instCmdWarn = false;
+        ImGui::OpenPopup(S(THPRAC_GAMES_ADD_COMMAND_MODAL));
+    }
+    RenderAddCommandModal(state, game);
+
     if (ImGui::Button(S(THPRAC_GAMES_DELETE))) {
         if (state->reflectiveLaunchID == game->id) {
             ImGui::OpenPopup("##cannot_delete_game");
@@ -792,7 +890,7 @@ static bool DetailsPage(LauncherState* state) {
     }
 
     ImGui::SameLine();
-    if (inst->type != TYPE_THCRAP) {
+    if (inst->type != TYPE_THCRAP && inst->type != TYPE_COMMAND) {
         if (ImGui::Button(S(THPRAC_GAMES_OPEN_FOLDER))) {
             std::wstring pathW;
             if (game->id == ID_TH06NC) pathW = NCInstallDirectory();
@@ -854,12 +952,12 @@ static bool DetailsPage(LauncherState* state) {
     ImGui::SameLine();
     Gui::HelpMarker(S(THPRAC_GAMES_DEFAULT_LAUNCH_DESC));
 
-    if(game->id == ID_TH06NC) {
+    if(game->id == ID_TH06NC && inst->type != TYPE_COMMAND) {
         ImGui::Checkbox(S(THPRAC_GAMES_LOW_LATENCY), &inst->low_latency);
         ImGui::SameLine();
         Gui::HelpMarker(S(THPRAC_GAMES_LOW_LATENCY_DESC));
     }
-    if (inst->type != TYPE_THCRAP && inst->type != TYPE_STEAM) {
+    if (inst->type != TYPE_THCRAP && inst->type != TYPE_STEAM && inst->type != TYPE_COMMAND) {
         if (ver->has_oilp) {
             ImGui::Checkbox(S(THPRAC_GAMES_USE_OILP), &inst->allow_oilp);
             ImGui::SameLine();
@@ -1424,7 +1522,7 @@ static DWORD WINAPI RescanThread(LPVOID lpParam) {
 
     for (auto& game : games) {
         for (size_t i = 0; i < game.inst_count; scanCtx->exes_scanned++) {
-            if (game.instances[i].type == TYPE_THCRAP) {
+            if (game.instances[i].type == TYPE_THCRAP || game.instances[i].type == TYPE_COMMAND) {
                 i++;
                 continue;
             }
@@ -1457,6 +1555,11 @@ static void GameRightClickMenu(LauncherState* state, LauncherGame* game) {
             state->selectedGame = game;
             ImGui::CloseCurrentPopup();
         }
+        // Register a launch-command instance straight from the game list.
+        if (ImGui::Selectable(S(THPRAC_GAMES_ADD_COMMAND))) {
+            state->pendingAddCommandGame = game;
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::Separator();
     }
 
@@ -1464,6 +1567,14 @@ static void GameRightClickMenu(LauncherState* state, LauncherGame* game) {
         state->inScan = true;
         state->scanCtx.relative = _gIsLocalConfigDir;
         ImGui::CloseCurrentPopup();
+    }
+    // Window-level menu (opened on an unregistered game or empty space):
+    // offer command registration for the hovered instance-less game.
+    if (!game && state->hoveredGame && !state->hoveredGame->instances) {
+        if (ImGui::Selectable(S(THPRAC_GAMES_ADD_COMMAND))) {
+            state->pendingAddCommandGame = state->hoveredGame;
+            ImGui::CloseCurrentPopup();
+        }
     }
     if(ImGui::Selectable(S(THPRAC_STEAM_MNG_BUTTON))) {
         state->inScan = true;
@@ -1846,6 +1957,18 @@ void LauncherGamesMain(LauncherState* state) {
     
     ImGui::TextUnformatted(S(THPRAC_GAMES_SPINOFF_OTHERS));
     GamesList(state, spinoffOthers, elementsof(spinoffOthers));
+
+    // The right-click menu deferred a launch-command instance modal here.
+    if (state->pendingAddCommandGame) {
+        // Only open it once: reopening every frame would resurrect the modal
+        // even after the user closes it (cancel/OK).
+        if (!ImGui::IsPopupOpen(S(THPRAC_GAMES_ADD_COMMAND_MODAL))) {
+            ImGui::OpenPopup(S(THPRAC_GAMES_ADD_COMMAND_MODAL));
+        }
+        if (!RenderAddCommandModal(state, state->pendingAddCommandGame)) {
+            state->pendingAddCommandGame = nullptr;
+        }
+    }
 
     if (ImGui::BeginPopup("##__menu_open_steam")) {
         if (ImGui::Selectable(S(THPRAC_GOTO_STEAM_PAGE))) {

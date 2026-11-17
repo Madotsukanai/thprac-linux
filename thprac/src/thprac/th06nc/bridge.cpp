@@ -5,18 +5,19 @@
 #include "bridge_resource.h"
 #include <shlobj.h>
 #include <fstream>
+#include <vector>
 namespace {
 Shared* shared{}; HANDLE mapping{},mutex{}; DWORD targetPid{};
 void log(const std::wstring& text) {
     static std::ofstream* f=nullptr;
-    if(!f){ static std::ofstream fs; std::wstring p=directory(executablePath())+L"\\thprac-th06nc.log"; fs.open(std::string(p.begin(),p.end()), std::ios::app); f=&fs; }
+    if(!f){ static std::ofstream fs; std::wstring p=directory(executablePath())+L"\\thprac-linux.log"; fs.open(std::string(p.begin(),p.end()), std::ios::app); f=&fs; }
     if(f&&f->is_open()){
         int n=WideCharToMultiByte(CP_UTF8,0,text.c_str(),-1,nullptr,0,nullptr,nullptr);
         std::string u(n>1?n-1:0,'\0'); if(n>1) WideCharToMultiByte(CP_UTF8,0,text.c_str(),-1,u.data(),n,nullptr,nullptr);
         (*f)<<u<<"\n"; f->flush();
     }
 }
-void failure(const std::wstring& text) { log(L"FAIL: "+text); MessageBoxW(nullptr,text.c_str(),L"thprac - th06nc",MB_ICONERROR); }
+void failure(const std::wstring& text) { log(L"FAIL: "+text); MessageBoxW(nullptr,text.c_str(),L"thprac-linux",MB_ICONERROR); }
 void disconnect() { if(shared)UnmapViewOfFile(shared);if(mapping)CloseHandle(mapping);if(mutex)CloseHandle(mutex);shared=nullptr;mapping=nullptr;mutex=nullptr;targetPid=0; }
 bool writeResource(int id,const std::wstring& path) {
     HRSRC res=FindResourceW(nullptr,MAKEINTRESOURCEW(id),RT_RCDATA); if(!res) return false;
@@ -29,7 +30,7 @@ bool writeResource(int id,const std::wstring& path) {
 std::wstring payloadDir() {
     static std::wstring dir; if(!dir.empty()) return dir;
     wchar_t tmp[MAX_PATH+1]{}; DWORD n=GetTempPathW(MAX_PATH,tmp);
-    dir = (n?std::wstring(tmp):directory(executablePath())+L"\\") + L"thprac-th06nc\\";
+    dir = (n?std::wstring(tmp):directory(executablePath())+L"\\") + L"thprac-linux\\";
     CreateDirectoryW(dir.c_str(),nullptr);
     // extract embedded deps if present; fall back to exe dir when not embedded
     if(FindResourceW(nullptr,MAKEINTRESOURCEW(IDR_MODULE_DLL),RT_RCDATA)) {
@@ -47,6 +48,114 @@ std::wstring payloadDir() {
 const wchar_t* localized(int language,const wchar_t* zh,const wchar_t* en,const wchar_t* ja) {
     return language==0?zh:language==2?ja:en;
 }
+DWORD findGame();
+std::wstring envValue(const wchar_t* name) {
+    wchar_t buffer[1024]{}; DWORD n=GetEnvironmentVariableW(name,buffer,1024);
+    return (n&&n<1024)?std::wstring(buffer):std::wstring();
+}
+std::wstring posixToWin(std::wstring path) {
+    for(auto& c:path)if(c==L'/')c=L'\\';
+    if(!path.empty()&&path.front()==L'\\')path=L"Z:"+path;
+    return path;
+}
+std::wstring utf8ToWin(const std::string& text) {
+    int n=MultiByteToWideChar(CP_UTF8,0,text.c_str(),(int)text.size(),nullptr,0);
+    std::wstring r(n>0?n:0,L'\0');
+    if(n>0)MultiByteToWideChar(CP_UTF8,0,text.c_str(),(int)text.size(),r.data(),n);
+    return r;
+}
+std::wstring asciiLower(std::wstring s){for(auto& c:s)if(c>=L'A'&&c<=L'Z')c=wchar_t(c+32);return s;}
+bool fileExists(const std::wstring& path){return GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES;}
+bool underWine(){return GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"wine_get_version")!=nullptr;}
+// Only the game's own prefix may host a child th06nc.exe process; otherwise the
+// save data would land in the wrong Proton prefix.
+bool prefixIsGame() {
+    for(const wchar_t* name:{L"STEAM_COMPAT_DATA_PATH",L"WINEPREFIX"}) {
+        auto value=asciiLower(envValue(name));
+        if(value.find(L"compatdata/4659620")!=std::wstring::npos||
+           value.find(L"compatdata\\4659620")!=std::wstring::npos)return true;
+    }
+    return false;
+}
+bool vdfAppLibrary(const std::wstring& vdf,const char* appid,std::wstring& library) {
+    HANDLE f=CreateFileW(vdf.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+    if(f==INVALID_HANDLE_VALUE)return false;
+    LARGE_INTEGER size{};bool ok=GetFileSizeEx(f,&size)&&size.QuadPart>0&&size.QuadPart<=64*1024*1024;
+    std::string text;
+    if(ok){text.resize((size_t)size.QuadPart);DWORD got=0;ok=ReadFile(f,text.data(),(DWORD)text.size(),&got,nullptr)&&got==text.size();}
+    CloseHandle(f);if(!ok)return false;
+    size_t at=text.find(std::string("\"")+appid+"\"");
+    if(at==std::string::npos)return false;
+    size_t pathKey=text.rfind("\"path\"",at);
+    if(pathKey==std::string::npos)return false;
+    size_t q=text.find('"',pathKey+6);
+    if(q==std::string::npos)return false;
+    size_t e=text.find('"',q+1);
+    if(e==std::string::npos)return false;
+    library=posixToWin(utf8ToWin(text.substr(q+1,e-q-1)));
+    return true;
+}
+// steam://rungameid/4659620 cannot be resolved inside Wine/Proton (the URL
+// handler belongs to the Linux Steam client), so locate the Steam library on
+// the Z: drive and run th06nc.exe directly instead.
+std::wstring resolveGameExe() {
+    std::vector<std::wstring> roots;
+    for(const wchar_t* name:{L"STEAM_COMPAT_DATA_PATH",L"WINEPREFIX"}) {
+        std::wstring value=envValue(name),lower=asciiLower(value);
+        while(!lower.empty()&&(lower.back()==L'\\'||lower.back()==L'/')){lower.pop_back();value.pop_back();}
+        size_t pos=lower.find(L"\\compatdata\\");
+        if(pos==std::wstring::npos)pos=lower.find(L"/compatdata/");
+        if(pos!=std::wstring::npos)roots.push_back(posixToWin(value.substr(0,pos)));
+    }
+    auto home=envValue(L"HOME");
+    if(!home.empty()) {
+        auto base=posixToWin(home);
+        for(auto rel:{L"\\.local\\share\\Steam\\steamapps",L"\\.steam\\steam\\steamapps",
+                      L"\\.var\\app\\com.valvesoftware.Steam\\data\\Steam\\steamapps"})
+            roots.push_back(base+rel);
+    }
+    for(auto& root:roots) {
+        std::wstring exe=root+L"\\common\\th06nc\\th06nc.exe";
+        if(fileExists(exe))return exe;
+        std::wstring library;
+        if(vdfAppLibrary(root+L"\\libraryfolders.vdf","4659620",library)) {
+            exe=library+L"\\steamapps\\common\\th06nc\\th06nc.exe";
+            if(fileExists(exe))return exe;
+        }
+    }
+    WIN32_FIND_DATAW fd{};HANDLE h=FindFirstFileW(L"Z:\\home\\*",&fd);
+    if(h!=INVALID_HANDLE_VALUE) {
+        do {
+            if(!(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))continue;
+            std::wstring user=std::wstring(L"Z:\\home\\")+fd.cFileName;
+            for(auto rel:{L"\\.local\\share\\Steam\\steamapps\\common\\th06nc\\th06nc.exe",
+                          L"\\.steam\\steam\\steamapps\\common\\th06nc\\th06nc.exe",
+                          L"\\.var\\app\\com.valvesoftware.Steam\\data\\Steam\\steamapps\\common\\th06nc\\th06nc.exe"})
+                if(fileExists(user+rel))return user+rel;
+            std::wstring library;
+            if(vdfAppLibrary(user+L"\\.local\\share\\Steam\\steamapps\\libraryfolders.vdf","4659620",library)) {
+                std::wstring exe=library+L"\\steamapps\\common\\th06nc\\th06nc.exe";
+                if(fileExists(exe))return exe;
+            }
+        } while(FindNextFileW(h,&fd));
+        FindClose(h);
+    }
+    return {};
+}
+bool startGame(const std::wstring& exe) {
+    STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};std::wstring cmd=L"\""+exe+L"\"";
+    BOOL cp=CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,0,nullptr,directory(exe).c_str(),&si,&pi);
+    log(std::wstring(L"startDirect exe=")+exe+L" cp="+std::to_wstring(cp)+L" err="+std::to_wstring(GetLastError()));
+    if(cp){CloseHandle(pi.hThread);CloseHandle(pi.hProcess);return true;}
+    return false;
+}
+DWORD waitGame(int times) {
+    for(int i=0;i<times;++i){DWORD p=findGame();if(p)return p;Sleep(100);}
+    return 0;
+}
+// Direct launch requires either the game's own Proton prefix (a non-Steam
+// shortcut pointed at its compatdata) or a native Windows environment.
+bool mayDirectLaunch(){return !underWine()||prefixIsGame();}
 struct LaunchMapping {
     HANDLE handle{};LaunchOptions* view{};
     ~LaunchMapping(){if(view)UnmapViewOfFile(view);if(handle)CloseHandle(handle);}
@@ -160,6 +269,34 @@ DWORD findGame() {
     if(Process32FirstW(snapshot,&entry))do{if(_wcsicmp(entry.szExeFile,L"th06nc.exe")==0){if(pid){pid=0;break;}pid=entry.th32ProcessID;}}while(Process32NextW(snapshot,&entry));
     CloseHandle(snapshot);return pid;
 }
+// Run a host-side shell command (Wine/Proton/Steam/gamescope, ...) that starts
+// the game. Requires a Unix /bin/sh reachable through the Z: drive, i.e. a
+// Wine/Proton environment. THPRAC_LAUNCH_CMD holds the command in UTF-8.
+bool startViaCommand() {
+    auto envCmd=envValue(L"THPRAC_LAUNCH_CMD");
+    if(envCmd.empty())return false;
+    int n=WideCharToMultiByte(CP_UTF8,0,envCmd.c_str(),-1,nullptr,0,nullptr,nullptr);
+    std::string utf8(n>1?n-1:0,'\0');
+    if(n>1)WideCharToMultiByte(CP_UTF8,0,envCmd.c_str(),-1,utf8.data(),n,nullptr,nullptr);
+    std::wstring cmd=utf8ToWin(utf8);
+    std::wstring escaped;
+    for(auto c:cmd){if(c==L'"'){escaped+=L"\\\"";}else escaped+=c;}
+    log(L"startViaCommand sh -c "+cmd);
+    // Wine starts non-PE (Unix) executables natively, same mechanism the
+    // launcher's cross-prefix attach helper relies on.
+    STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
+    std::wstring shCmd=L"\"Z:\\bin\\sh\" -c \""+escaped+L"\"";
+    bool started=CreateProcessW(L"Z:\\bin\\sh",shCmd.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi);
+    auto result=started?INT_PTR(1):0;
+    if(started){CloseHandle(pi.hThread);CloseHandle(pi.hProcess);}
+    else {
+      log(L"startViaCommand CreateProcessW err="+std::to_wstring(GetLastError()));
+      std::wstring params=L"-c \""+escaped+L"\"";
+      result=(INT_PTR)ShellExecuteW(nullptr,L"open",L"Z:\\bin\\sh",params.c_str(),nullptr,SW_HIDE);
+    }
+    log(L"startViaCommand result="+std::to_wstring(result));
+    return result>32;
+}
 }
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
  int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);DWORD pid=0;bool launch=false;
@@ -196,32 +333,39 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
        L"Low latency is a launch option. Close the running game, then launch it again from thprac.",
        L"低遅延モードは起動時に適用されます。起動中のゲームを終了し、thpracから起動し直してください。"));return 5;
    }
-   if(!findGame()) {
-     std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
-     bool started=false;
-     if(GetFileAttributesW(exe.c_str())!=INVALID_FILE_ATTRIBUTES) {
-       STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{}; std::wstring cmd=L"\""+exe+L"\"";
-       BOOL cp=CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,0,nullptr,directory(executablePath()).c_str(),&si,&pi);
-       log(std::wstring(L"startDirect(launch) exe=")+exe+L" cp="+std::to_wstring(cp)+L" err="+std::to_wstring(GetLastError()));
-       if(cp){CloseHandle(pi.hThread);CloseHandle(pi.hProcess);started=true;}
-     } else log(L"no th06nc.exe at "+exe);
-     if(!started && (INT_PTR)ShellExecuteW(nullptr,L"open",L"steam://rungameid/4659620",nullptr,nullptr,SW_SHOWNORMAL)<=32) {failure(L"无法启动游戏。");return 1;}
-   }
-   for(int i=0;i<600&&!pid;++i) {pid=findGame();if(!pid)Sleep(100);}
- }
- if(!pid)pid=findGame();
- if(!pid) {
-   std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
-   if(GetFileAttributesW(exe.c_str())!=INVALID_FILE_ATTRIBUTES) {
-     STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{}; std::wstring cmd=L"\""+exe+L"\"";
-     BOOL cp=CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,0,nullptr,directory(executablePath()).c_str(),&si,&pi);
-     log(std::wstring(L"startDirect exe=")+exe+L" cp="+std::to_wstring(cp)+L" err="+std::to_wstring(GetLastError()));
-     if(cp){
-       CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-       for(int i=0;i<600&&!pid;++i){pid=findGame();if(!pid)Sleep(100);}
-     }
-   } else log(L"no th06nc.exe at "+exe);
- }
+    if(!findGame()) {
+      bool started=startViaCommand();
+      if(!started) {
+        std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
+        if(fileExists(exe))started=startGame(exe);
+        else log(L"no th06nc.exe at "+exe);
+        if(!started) {
+          if(mayDirectLaunch()) {
+            std::wstring resolved=resolveGameExe();
+            if(resolved.empty())log(L"steam library resolution failed");
+            else started=startGame(resolved);
+          } else log(L"prefix is not the game's own, skip direct launch");
+        }
+        if(!started && (INT_PTR)ShellExecuteW(nullptr,L"open",L"steam://rungameid/4659620",nullptr,nullptr,SW_SHOWNORMAL)<=32) {failure(L"无法启动游戏。");return 1;}
+      }
+    }
+    pid=waitGame(600);
+  }
+  if(!pid)pid=findGame();
+  if(!pid) {
+    bool started=startViaCommand();
+    if(!started) {
+      std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
+      if(fileExists(exe))started=startGame(exe);
+      else log(L"no th06nc.exe at "+exe);
+      if(!started&&mayDirectLaunch()) {
+        std::wstring resolved=resolveGameExe();
+        if(resolved.empty())log(L"steam library resolution failed");
+        else started=startGame(resolved);
+      }
+    }
+    if(started)pid=waitGame(600);
+  }
  log(L"pid="+std::to_wstring(pid)); if(!pid){failure(L"未找到 th06nc 游戏进程。");return 2;}
  bool ok=attach(pid,options);
  if(ok) {
@@ -239,7 +383,7 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
        :localized(language,L"尚未确认低延迟显示已就绪。请关闭游戏后重新启动。",
          L"Low-latency display is not ready. Please close the game and launch it again.",
          L"低遅延表示の準備を確認できませんでした。ゲームを終了して起動し直してください。");
-     MessageBoxW(nullptr,text,L"thprac - th06nc",MB_ICONWARNING);
+     MessageBoxW(nullptr,text,L"thprac-linux",MB_ICONWARNING);
    }
  }
  disconnect();return ok?0:3;

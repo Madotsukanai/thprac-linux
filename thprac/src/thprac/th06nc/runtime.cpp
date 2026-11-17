@@ -10,6 +10,9 @@
 namespace THPrac::TH06NC { uintptr_t imageBase{}; }
 using namespace THPrac::TH06NC;
 namespace {
+void rlog(const char* msg);
+void rlogw(const char* msg, unsigned v);
+bool addedSpellBgm(const Settings& settings);
 uintptr_t base{}; Shared* shared{}; HANDLE mutex{}, mapping{};
 LaunchOptions launchOptions{};
 using CalcCallback = int64_t(*)(uint32_t*);
@@ -301,7 +304,7 @@ int64_t update(void* p) {
             resumePracticeBgm();
             restartSeen=requested.restart;
             retryPending=true;
-            mem<uint8_t>(Rva::KeepBgm)=uint8_t((config.flags&KeepBgm)&&requested.stage==config.stage&&bossBgm(config)==bossBgm(requested));
+            mem<uint8_t>(Rva::KeepBgm)=uint8_t((config.flags&KeepBgm)&&requested.stage==config.stage&&bossBgm(config)==bossBgm(requested)&&addedSpellBgm(config)==addedSpellBgm(requested));
             // The native state machine handles teardown/recreation, including all callbacks.
             mem<int>(Rva::NextState)=12; // Native retry path; 3 is next-stage and reuses unloaded ANMs.
             return 3;
@@ -394,20 +397,47 @@ void finalPhase(void* enemyObject,void* instr) {
     originalFinal(enemyObject,instr);field<int>(enemyObject,4)=age;
 }
 void transition(void* menuObject,int origin,int mode) {
+    rlogw("diag trans origin=",origin);rlogw("diag trans mode=",mode);
+    rlogw("diag trans page=",field<int>(menuObject,0x168b0));rlogw("diag trans cc=",field<int>(menuObject,0x168cc));
+    rlogw("diag trans d1=",field<uint8_t>(menuObject,0x168d1));rlogw("diag trans d3=",field<uint8_t>(menuObject,0x168d3));
+    rlogw("diag trans stage=",mem<int>(Rva::Stage));
     if(origin==0x16 && field<uint8_t>(menuObject,0x168d1) && !field<uint8_t>(menuObject,0x168d3)) {
         selectedDifficulty=std::clamp(MenuDifficulty(),0,3);
         practiceMenu=menuObject;practiceTransitionMode=mode;OpenPractice();return;
     }
     originalTransition(menuObject,origin,mode);
 }
+// Spells from "Fragile Wing" onward (the added spells) use th06_16 instead of
+// the stage's boss theme.
+bool addedSpellBgm(const Settings& settings) { return settings.stage==7 && IsAddedSpell(settings.section); }
+const char* addedSpellBgmPath(const char* path) {
+    static char buffer[260];
+    if(!path||strnlen_s(path,sizeof(buffer))>=sizeof(buffer))return path;
+    strcpy(buffer,path);
+    char* number=strstr(buffer,"th06_");
+    if(!number||number[5]<'0'||number[5]>'9'||number[6]<'0'||number[6]>'9')return path;
+    number[5]='1';number[6]='6';
+    return buffer;
+}
 int64_t playBgm(void* supervisor,const char* path) {
     if(initializingPractice && bossBgm(config)) {
         auto stageData=mem<uintptr_t>(Rva::StageData);
         if(stageData)path=reinterpret_cast<const char*>(stageData+0x310);
+        if(addedSpellBgm(config))path=addedSpellBgmPath(path);
     }
     return originalBgm(supervisor,path);
 }
 int64_t menu(void* p) {
+    static int diagPage=-9999;
+    int diagCur=field<int>(p,0x168b0);
+    if(diagCur!=diagPage) {
+        diagPage=diagCur;
+        rlogw("diag page ",diagCur);
+        rlogw("diag cc ",field<int>(p,0x168cc));
+        rlogw("diag d1 ",field<uint8_t>(p,0x168d1));
+        rlogw("diag d3 ",field<uint8_t>(p,0x168d3));
+        rlogw("diag stage ",mem<int>(Rva::Stage));
+    }
     if(practiceMenu==p) {
         int action=TakePracticeAction();
         if(!action) {
@@ -446,11 +476,11 @@ int64_t menu(void* p) {
 }
 
 void rlog(const char* msg) {
-    FILE* f=fopen("thprac-th06nc.log","ab");
+    FILE* f=fopen("thprac-linux.log","ab");
     if(f){fputs("[dll] ",f);fputs(msg,f);fputs("\n",f);fclose(f);}
 }
 void rlogw(const char* msg, unsigned v) {
-    FILE* f=fopen("thprac-th06nc.log","ab");
+    FILE* f=fopen("thprac-linux.log","ab");
     if(f){fprintf(f,"[dll] %s%u\n",msg,v);fclose(f);}
 }
 
@@ -470,7 +500,7 @@ DWORD WINAPI start(void*) {
     language.store(launchOptions.language);
     rlog("creating mapping");
     auto mn=mapName(GetCurrentProcessId());
-    {int nn=WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,nullptr,0,nullptr,nullptr); std::string u(nn>1?nn-1:0,'\0'); if(nn>1)WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,u.data(),nn,nullptr,nullptr); FILE* f=fopen("thprac-th06nc.log","ab"); if(f){fputs("[dll] map name: ",f);fputs(u.c_str(),f);fputs("\n",f);fclose(f);}}
+    {int nn=WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,nullptr,0,nullptr,nullptr); std::string u(nn>1?nn-1:0,'\0'); if(nn>1)WideCharToMultiByte(CP_UTF8,0,mn.c_str(),-1,u.data(),nn,nullptr,nullptr); FILE* f=fopen("thprac-linux.log","ab"); if(f){fputs("[dll] map name: ",f);fputs(u.c_str(),f);fputs("\n",f);fclose(f);}}
     mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mn.c_str());
     rlogw("map created err=",GetLastError());
     if(!mapping){rlogw("mapfail err=",GetLastError());return 1;}

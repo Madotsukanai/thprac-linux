@@ -5,6 +5,7 @@
 #include "thprac_licence.h"
 #include "thprac_load_exe.h"
 #include "thprac_fork.h"
+#include "thprac_update.h"
 
 #include <psapi.h>
 
@@ -19,9 +20,9 @@ namespace Gui {
 }
 
 static const wchar_t* LAUNCHER_TITLE_W[] = {
-    L"thprac-th06nc v" THPRAC_FORK_VERSION L" - 东方游戏启动器",
-    L"thprac-th06nc v" THPRAC_FORK_VERSION L" - Touhou Game Launcher",
-    L"thprac-th06nc v" THPRAC_FORK_VERSION L" - 東方ゲームランチャー"
+    L"thprac-linux v" THPRAC_FORK_VERSION L" - 东方游戏启动器",
+    L"thprac-linux v" THPRAC_FORK_VERSION L" - Touhou Game Launcher",
+    L"thprac-linux v" THPRAC_FORK_VERSION L" - 東方ゲームランチャー"
 };
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -288,7 +289,7 @@ static void LauncherSettingsMain(LauncherState* state) {
     ImGui::NewLine();
     ImGui::TextUnformatted(S(TH_ABOUT_THPRAC));
     ImGui::Separator();
-    ImGui::Text("thprac-th06nc v%s", THPRAC_FORK_VERSION);
+    ImGui::Text("thprac-linux v%s", THPRAC_FORK_VERSION);
     ImGui::TextUnformatted(S(TH06NC_UNOFFICIAL));
     ImGui::Text(S(TH06NC_UPSTREAM_VERSION), VER_PARAMS_CUR);
     if (ImGui::Button(S(TH06NC_PROJECT_PAGE))) {
@@ -306,6 +307,45 @@ static void LauncherSettingsMain(LauncherState* state) {
     if (ImGui::Button(S(TH_ABOUT_SHOW_LICENCE))) {
         state->settingsLicenseInfo = true;
     }
+    ImGui::NewLine();
+
+    // Automatic update via the fork's GitHub Releases.
+    char updateVersion[32] = {};
+    switch (UpdateQueryStatus(updateVersion, sizeof(updateVersion))) {
+    case UPDATE_CHECKING:
+        ImGui::TextUnformatted(S(THPRAC_UPDATE_CHECKING));
+        break;
+    case UPDATE_AVAILABLE:
+        ImGui::Text(S(THPRAC_UPDATE_AVAILABLE), updateVersion);
+        if (ImGui::Button(S(THPRAC_UPDATE_DOWNLOAD))) {
+            UpdateDownloadAndInstall();
+        }
+        break;
+    case UPDATE_DOWNLOADING:
+        ImGui::TextUnformatted(S(THPRAC_UPDATE_DOWNLOADING));
+        break;
+    case UPDATE_CURRENT:
+        ImGui::TextUnformatted(S(THPRAC_UPDATE_UPTODATE));
+        break;
+    case UPDATE_FAILED:
+        ImGui::TextUnformatted(S(THPRAC_UPDATE_CHECK_FAILED));
+        if (ImGui::Button(S(THPRAC_UPDATE_RETRY))) {
+            RestartUpdateCheck();
+        }
+        break;
+    case UPDATE_INSTALL_FAILED:
+        ImGui::Text(S(THPRAC_UPDATE_INSTALL_FAILED));
+        if (ImGui::Button(S(THPRAC_UPDATE_RETRY))) {
+            RestartUpdateCheck();
+        }
+        break;
+    default:
+        if (ImGui::Button(S(THPRAC_UPDATE_CHECK))) {
+            RestartUpdateCheck();
+        }
+        break;
+    }
+
     ImGui::NewLine();
     ImGui::Text(S(TH_ABOUT_THANKS), "You!");
 }
@@ -603,6 +643,11 @@ int Launcher(HINSTANCE hInstance, int nCmdShow) {
     LoadLauncherSettings(&state->settings);
     LoadGamesJson(state);
     LoadLinksJson(state->linkSets);
+
+    // Clean up leftovers from a previous update, then check GitHub Releases
+    // (https://github.com/Madotsukanai/thprac-linux) in the background.
+    THPrac::UpdateCleanupTempFiles();
+    THPrac::StartUpdateCheck();
 
     // Show the window
     ShowWindow(hwnd, nCmdShow);

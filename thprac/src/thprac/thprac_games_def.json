@@ -26,14 +26,14 @@
         "thpracの適用に失敗しました。"
       ],
 
-      "THPRAC_LAUNCHER": [ "thprac-th06nc - 东方游戏启动器", "thprac-th06nc - Touhou Game Launcher", "thprac-th06nc - 東方ゲームランチャー" ],
+      "THPRAC_LAUNCHER": [ "thprac-linux - 东方游戏启动器", "thprac-linux - Touhou Game Launcher", "thprac-linux - 東方ゲームランチャー" ],
       "TH06NC_UNOFFICIAL": [ "非官方分支", "Unofficial fork", "非公式フォーク" ],
       "TH06NC_UPSTREAM_VERSION": [ "基于 thprac %d.%d.%d.%d", "Based on thprac %d.%d.%d.%d", "ベース: thprac %d.%d.%d.%d" ],
       "TH06NC_PROJECT_PAGE": [ "本分支项目主页", "Fork project page", "フォークのホームページ" ],
-      "TH06NC_RELEASES": [ "下载本分支更新", "Download fork updates", "フォークの更新をダウンロード" ],
+      "TH06NC_RELEASES": [ "打开Releases页面", "Open Releases page", "Releases ページを開く" ],
       "TH06NC_ISSUES": [ "反馈本分支问题", "Report a fork issue", "フォークの不具合報告" ],
       "TH06NC_UPSTREAM": [ "原版 thprac 项目", "Upstream thprac", "元の thprac プロジェクト" ],
-      "TH06NC_MANUAL_UPDATES": [ "更新请打开本分支的 GitHub Releases，下载新版 EXE，关闭游戏和启动器后替换。", "For updates, open this fork's GitHub Releases, download the new EXE, and replace it after closing the game and launcher.", "更新はこのフォークの GitHub Releases から新しい EXE を入手し、ゲームとランチャーを終了してから置き換えてください。" ],
+      "TH06NC_MANUAL_UPDATES": [ "启动器会在启动时自动检查本分支 GitHub Releases 上的新版本。发现新版本后,可在本页下方一键下载并安装,无需手动替换 EXE。也可通过右侧按钮打开 Releases 页面。", "The launcher automatically checks this fork's GitHub Releases for a new version on startup. When one is found, it can be downloaded and installed with one click further down this page — no manual EXE replacement needed. The Releases page can also be opened with the button below.", "ランチャーは起動時にこのフォークの GitHub Releases の新バージョンを自動で確認します。見つかった場合はこのページの下でワンクリックでダウンロード・インストールでき、EXEの手動入れ替えは不要です。下のボタンから Releases ページを開くこともできます。" ],
       "TH06NC_OPEN_LINK_ERROR": [ "无法打开浏览器，请手动访问：", "Could not open the browser. Please visit:", "ブラウザーを開けません。次の URL にアクセスしてください：" ],
       "TH06NC_INSTALL_DIRECTORY_ERROR": [ "未找到 Steam 登记的新典安装目录。请确认游戏已安装。", "Could not find New Classic's installation directory registered by Steam. Please make sure the game is installed.", "Steamに登録された新典のインストール先が見つかりません。ゲームがインストールされているか確認してください。" ],
       "THPRAC_LAUNCHER_CHECKING_UPDATE": [ "thprac - 东方游戏启动器 // 检查更新中...", "thprac - Touhou Game Launcher // Checking for updates...", "thprac - 東方ゲームランチャー // 更新を確認中..." ],
@@ -230,6 +230,42 @@
       "THPRAC_GAMES_OPEN_FOLDER": [ "打开文件夹", "Open folder", "フォルダを開く" ],
       "THPRAC_GAMES_OPEN_APPDATA": [ "打开游戏数据文件夹", "Open game data folder", "ゲームデータフォルダを開く" ],
       "THPRAC_GAMES_LAUNCH_CUSTOM": [ "启动custom.exe", "Launch custom.exe", "custom.exeを起動します" ],
+      "THPRAC_GAMES_ADD_COMMAND": [ "添加启动命令实例", "Add launch command", "起動コマンドを追加" ],
+      "THPRAC_GAMES_ADD_COMMAND_MODAL": [ "添加启动命令实例##modal", "Add launch command##modal", "起動コマンドを追加##modal" ],
+      "THPRAC_GAMES_COMMAND_NAME_LABEL": [ "实例名称:", "Name:", "インスタンス名:" ],
+      "THPRAC_GAMES_COMMAND_CMD_LABEL": [ "启动命令:", "Command:", "起動コマンド:" ],
+      "THPRAC_GAMES_COMMAND_DESC": [
+        "输入在 Linux/Wine 环境下启动游戏的 shell 命令（如 wine、proton、steam 或 gamescope 命令），保存到 games.json 的实例列表中。点击开始后 thprac 会在游戏进程出现时自动附加。",
+        "A shell command that starts the game under Linux/Wine (wine, proton, steam, gamescope, ...), stored as an instance in games.json. When launched, thprac attaches to the game process as soon as it appears.",
+        "Linux/Wine環境でゲームを起動するシェルコマンド(wine、proton、steam、gamescopeなど)を入力し、games.jsonのインスタンスとして保存します。開始後、thpracはゲームプロセスが現れた時点で自動的に接続します。"
+      ],
+      "THPRAC_GAMES_COMMAND_EMPTY": [
+        "实例名称与启动命令不能为空。",
+        "The instance name and command must not be empty.",
+        "インスタンス名と起動コマンドは空にできません。"
+      ],
+      "THPRAC_UPDATE_CHECK": [ "检查更新", "Check for updates", "更新を確認" ],
+      "THPRAC_UPDATE_CHECKING": [ "正在检查更新…", "Checking for updates…", "更新を確認中…" ],
+      "THPRAC_UPDATE_AVAILABLE": [ "发现新版本 %s", "New version available: %s", "新しいバージョンがあります: %s" ],
+      "THPRAC_UPDATE_DOWNLOAD": [ "下载并安装", "Download and install", "ダウンロードしてインストール" ],
+      "THPRAC_UPDATE_DOWNLOADING": [ "正在下载更新…", "Downloading update…", "更新をダウンロード中…" ],
+      "THPRAC_UPDATE_UPTODATE": [ "已是最新版本。", "You are up to date.", "最新バージョンです。" ],
+      "THPRAC_UPDATE_CHECK_FAILED": [
+        "检查更新失败(无法访问GitHub或网络不可用)。",
+        "Failed to check for updates (cannot reach GitHub or the network).",
+        "更新の確認に失敗しました(GitHubに接続できないか、ネットワークが利用できません)。"
+      ],
+      "THPRAC_UPDATE_INSTALL_FAILED": [
+        "下载或安装失败。",
+        "Failed to download or install the update.",
+        "ダウンロードまたはインストールに失敗しました。"
+      ],
+      "THPRAC_UPDATE_RETRY": [ "重试", "Retry", "再試行" ],
+      "THPRAC_GAMES_COMMAND_FAILED": [
+        "无法执行启动命令。请检查命令是否可以在当前 Wine/Proton 环境下运行。",
+        "Failed to execute the launch command. Check that it can run in the current Wine/Proton environment.",
+        "起動コマンドを実行できませんでした。現在のWine/Proton環境で実行できるか確認してください。"
+      ],
       "THPRAC_GAMES_USE_VPATCH": [ "使用VsyncPatch（如果可用）", "Use VsyncPatch (if avaliable)", "VsyncPatch を使用する (利用可能な場合)" ],
       "THPRAC_GAMES_LOW_LATENCY": [ "以低延迟模式启动（实验性）", "Launch with low latency (experimental)", "低遅延モードで起動（試験的機能）" ],
       "THPRAC_GAMES_LOW_LATENCY_UNAVAILABLE": [
@@ -320,6 +356,7 @@
       "THPRAC_GAMEROLL_TH185": [ "弹幕狂们的黑市", "th185", "バレットフィリア達の闇市場" ],
       "THPRAC_GAMEROLL_TH19": [ "兽王园", "th19", "獣王園" ],
       "THPRAC_GAMEROLL_TH20": [ "锦上京", "th20", "錦上京" ],
+      "THPRAC_GAMEROLL_TH06NC": [ "红魔乡NC", "th06nc", "紅魔郷NC" ],
 
       "THPRAC_GAMEROLL_TH02_SHOTTYPES": [ "灵梦A\\0灵梦B\\0灵梦C\\0\\0", "Reimu A\\0Reimu B\\0Reimu C\\0\\0", "靈梦A\\0靈梦B\\0靈梦C\\0\\0" ],
       "THPRAC_GAMEROLL_TH03_SHOTTYPES": [
@@ -462,6 +499,7 @@
       "TH_TYPE_UNCERTAIN": [ "不确定", "Uncertain", "不確定" ],
       "TH_TYPE_MALICIOUS": [ "恶意", "Malicious", "悪質" ],
       "TH_TYPE_UNKOWN": [ "未知", "Unknown", "不明" ],
+      "TH_TYPE_COMMAND": [ "启动命令", "Command", "起動コマンド" ],
 
       "TH06_TITLE": [
         "TH06 东方红魔乡　～ the Embodiment of Scarlet Devil.",
@@ -628,7 +666,8 @@
         "TH_TYPE_STEAM",
         "TH_TYPE_UNCERTAIN",
         "TH_TYPE_MALICIOUS",
-        "TH_TYPE_UNKOWN"
+        "TH_TYPE_UNKOWN",
+        "TH_TYPE_COMMAND"
       ],
       "THPRAC_GAMEROLL_PC98": [
         "THPRAC_GAMEROLL_TH01",
@@ -652,7 +691,8 @@
         "THPRAC_GAMEROLL_TH17",
         "THPRAC_GAMEROLL_TH18",
         "THPRAC_GAMEROLL_TH19",
-        "THPRAC_GAMEROLL_TH20"
+        "THPRAC_GAMEROLL_TH20",
+        "THPRAC_GAMEROLL_TH06NC"
       ],
       "THPRAC_GAMEROLL_SPINOFF_SHMUP": [
         "THPRAC_GAMEROLL_ALCOSTG",

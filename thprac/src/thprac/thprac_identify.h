@@ -18,6 +18,9 @@ enum THGameType {
     TYPE_UNCERTAIN = 9,
     TYPE_MALICIOUS = 10,
     TYPE_UNKNOWN = 11,
+    // Not a game executable: "path" holds a shell command (Wine/Proton/Steam
+    // ...) that starts the game on the host, e.g. from the games.json list.
+    TYPE_COMMAND = 12,
 };
 
 enum THGameID {

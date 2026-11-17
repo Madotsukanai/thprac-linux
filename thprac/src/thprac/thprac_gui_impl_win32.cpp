@@ -520,6 +520,54 @@ namespace Gui {
     }
 
     // API Functions
+    // Clipboard support for InputText (Ctrl+C/Ctrl+V). Wine maps these Win32
+    // calls to the host clipboard, so plain Win32 is enough here.
+    static ImVector<char> g_ClipboardTextUtf8;
+
+    static const char* Win32GetClipboardText(void*)
+    {
+        if (!::OpenClipboard(g_hWnd))
+            return nullptr;
+        HANDLE data = ::GetClipboardData(CF_UNICODETEXT);
+        if (data == nullptr) {
+            ::CloseClipboard();
+            return nullptr;
+        }
+        wchar_t* buf = (wchar_t*)::GlobalLock(data);
+        if (buf == nullptr) {
+            ::CloseClipboard();
+            return nullptr;
+        }
+        const int len = ::WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            g_ClipboardTextUtf8.resize(len);
+            ::WideCharToMultiByte(CP_UTF8, 0, buf, -1, g_ClipboardTextUtf8.Data, len, nullptr, nullptr);
+        }
+        ::GlobalUnlock(data);
+        ::CloseClipboard();
+        return g_ClipboardTextUtf8.Data;
+    }
+
+    static void Win32SetClipboardText(void*, const char* text)
+    {
+        if (!::OpenClipboard(g_hWnd))
+            return;
+        const int len = ::MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+        if (len > 0) {
+            HGLOBAL data = ::GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)len * sizeof(wchar_t));
+            if (data != nullptr) {
+                wchar_t* buf = (wchar_t*)::GlobalLock(data);
+                if (buf != nullptr) {
+                    ::MultiByteToWideChar(CP_UTF8, 0, text, -1, buf, len);
+                    ::GlobalUnlock(data);
+                    ::SetClipboardData(CF_UNICODETEXT, data);
+                }
+                ::GlobalFree(data);
+            }
+        }
+        ::CloseClipboard();
+    }
+
     bool ImplWin32Init(void* hwnd)
     {
         if (!::QueryPerformanceFrequency((LARGE_INTEGER*)&g_TicksPerSecond))
@@ -533,6 +581,8 @@ namespace Gui {
         io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors; // We can honor GetMouseCursor() values (optional)
         io.BackendFlags |= ImGuiBackendFlags_HasSetMousePos; // We can honor io.WantSetMousePos requests (optional, rarely used)
         io.BackendPlatformName = "thprac_gui_impl_win32";
+        io.GetClipboardTextFn = Win32GetClipboardText;
+        io.SetClipboardTextFn = Win32SetClipboardText;
         //io.ImeWindowHandle = hwnd;
 
         // Keyboard mapping. ImGui will use those indices to peek into the io.KeysDown[] array that we will update during the application lifetime.
@@ -585,6 +635,14 @@ namespace Gui {
 
         // Update OS mouse position
         ImplWin32UpdateMousePos(mouseMapping);
+
+        // Read keyboard modifier states. These were stripped from upstream's
+        // NewFrame, but InputText shortcuts (Ctrl+C/Ctrl+V/Ctrl+A/Ctrl+X) rely
+        // on io.KeyCtrl, so they must be set every frame.
+        io.KeyCtrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        io.KeyShift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        io.KeyAlt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+        io.KeySuper = false;
 
         // Update OS mouse cursor with the cursor requested by imgui
         ImGuiMouseCursor mouse_cursor = io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor();

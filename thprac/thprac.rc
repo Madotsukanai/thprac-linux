@@ -17,10 +17,10 @@ BEGIN
         BEGIN
             VALUE "FileVersion", THPRAC_FORK_VERSION
             VALUE "ProductVersion", THPRAC_FORK_VERSION
-			VALUE "FileDescription", "thprac-th06nc - Unofficial Touhou Practice Tool"
-			VALUE "InternalName", "thprac-th06nc.exe"
-            VALUE "OriginalFilename", "thprac-th06nc.exe"
-            VALUE "ProductName", "thprac-th06nc"
+			VALUE "FileDescription", "thprac-linux - Unofficial Touhou Practice Tool"
+			VALUE "InternalName", "thprac-linux.exe"
+            VALUE "OriginalFilename", "thprac-linux.exe"
+            VALUE "ProductName", "thprac-linux"
 			VALUE "LegalCopyright", "Copyright (c) 2022 Ack; thprac and th06nc fork contributors"
         END
     END
