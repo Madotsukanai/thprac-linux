@@ -265,10 +265,15 @@ static DWORD StripSteamOverlayAndRelaunch(bool* relaunched) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
-    bool relaunched = false;
-    DWORD relaunchCode = StripSteamOverlayAndRelaunch(&relaunched);
-    if (relaunched) {
-        return (int)relaunchCode;
+    // Only strip the Steam overlay when running as the main executable. When
+    // this module is loaded into a game by LoadSelf, GetModuleFileNameW(nullptr)
+    // would return the game path and relaunching would start a second game.
+    if ((PVOID)&THPrac::__ImageBase == CurrentPeb()->ImageBaseAddress) {
+        bool relaunched = false;
+        DWORD relaunchCode = StripSteamOverlayAndRelaunch(&relaunched);
+        if (relaunched) {
+            return (int)relaunchCode;
+        }
     }
     InitConfigDir();
     LoadSettings();

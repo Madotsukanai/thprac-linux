@@ -5,6 +5,8 @@
 #include "thprac_log.h"
 #include "thprac_gui_locale.h"
 #include "thprac_utils.h"
+#include "thprac_native_bundle.h"
+#include "thprac_attach_log.h"
 
 #include <windows.h>
 
@@ -545,6 +547,148 @@ bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, Scrip
     return started && result.done;
 }
 
+// ---------------------------------------------------------------------------
+// ptrace-based injection. A native helper (tools/thprac_injector.c, shipped in
+// the bundle) attaches to the target with ptrace and remotely calls
+// LoadLibraryW on a tiny loader DLL. The loader DLL then starts the regular
+// thprac attach helper inside the target's prefix/container, where the
+// existing Windows API attach path takes over. This bypasses the fragile
+// launch-client/nsenter dance entirely when the caller is allowed to ptrace
+// the target (kernel.yama.ptrace_scope / cap_sys_ptrace).
+// ---------------------------------------------------------------------------
+const char kInjectScript[] = R"SH(
+LC_ALL=C; export LC_ALL
+dbg() { printf '%s\n' "$*" >> "$OUT.log"; }
+stage=${THPRAC_STAGE:-$HOME/.cache/thprac-wine}
+mkdir -p "$stage" 2>>"$OUT.log" || stage=/tmp/thprac-wine-$(id -u 2>/dev/null || echo 0)
+mkdir -p "$stage" 2>>"$OUT.log"
+if ! cp -f "$INJ" "$stage/thprac-injector" 2>>"$OUT.log" || ! chmod +x "$stage/thprac-injector" 2>>"$OUT.log"; then
+  echo "ERR stage-injector" >> "$OUT"
+else
+  cp -f "$LOADER" "$stage/thprac_wineloader.dll" 2>>"$OUT.log" || echo "ERR stage-loader" >> "$OUT"
+  to_dos() { printf 'Z:%s' "$(printf %s "$1" | tr '/' '\\')"; }
+  loader_dos=$(to_dos "$stage/thprac_wineloader.dll")
+  self_dos=$(to_dos "$SELF")
+  printf '"%s" --attach %s\n' "$self_dos" "$TARGET" > "$stage/thprac_wineloader.cfg"
+  printf 'env:THPRAC_WINE_LOCAL_ONLY=1\n' >> "$stage/thprac_wineloader.cfg"
+  dbg "inject: pid=$TARGET loader=$loader_dos"
+  "$stage/thprac-injector" --pid "$TARGET" --dll "$loader_dos" >> "$OUT.log" 2>&1
+  rc=$?
+  dbg "inject rc=$rc"
+  echo "RC $rc" >> "$OUT"
+fi
+echo DONE >> "$OUT"
+)SH";
+
+struct InjectResult {
+    bool ran = false;
+    bool success = false;
+    bool ptraceDenied = false;
+};
+
+std::vector<std::string> SplitLines(const std::string& text);
+
+// Runs the ptrace injector. Returns false if it could not run at all (no
+// bundle, no usable temp dir); check the fields otherwise.
+bool TryPtraceInject(const Candidate& c, InjectResult& result) {
+    result = {};
+    if (!NativeBundle::Present()) {
+        DebugLog("ptrace inject: no embedded bundle");
+        return false;
+    }
+    auto injector = NativeBundle::Read(NativeBundle::BundleId + 11);
+    auto loader = NativeBundle::Read(NativeBundle::BundleId + 12);
+    if (!injector.data || !loader.data) {
+        DebugLog("ptrace inject: bundle resources missing");
+        return false;
+    }
+    // Materialise both files (NativeBundle::Prepare does this for the whole
+    // bundle; reuse it so the files also exist for the helper we start).
+    std::wstring helperPath;
+    if (!NativeBundle::Prepare(helperPath)) {
+        DebugLog("ptrace inject: bundle extraction failed");
+        return false;
+    }
+    wchar_t dir[32768] = {};
+    lstrcpynW(dir, helperPath.c_str(), 32000);
+    wchar_t* sep = dir + lstrlenW(dir);
+    while (sep > dir && *sep != L'\\' && *sep != L'/') --sep;
+    *sep = 0;
+    std::wstring injectorPath = std::wstring(dir) + L"\\thprac-injector";
+    std::wstring loaderPath = std::wstring(dir) + L"\\thprac_wineloader.dll";
+
+    wchar_t self[MAX_PATH * 2] = {};
+    if (!GetModuleFileNameW(nullptr, self, (DWORD)std::size(self))) {
+        DebugLog("ptrace inject: GetModuleFileNameW failed");
+        return false;
+    }
+
+    // Staging/result files, same scheme as RunScript.
+    wchar_t tmp[MAX_PATH + 1] = {};
+    DWORD n = GetTempPathW(MAX_PATH, tmp);
+    if (!n || n > MAX_PATH) return false;
+    std::wstring base = std::wstring(tmp, n) + L"thprac_pinj_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
+    std::wstring outW = base + L".out";
+    std::wstring logW = base + L".out.log";
+    if (!WriteAll(outW, "")) return false;
+    std::string outU = ToUnixPath(outW);
+    std::string injU = ToUnixPath(injectorPath);
+    std::string loaderU = ToUnixPath(loaderPath);
+    std::string selfU = ToUnixPath(self);
+    if (outU.empty() || injU.empty() || loaderU.empty() || selfU.empty()) {
+        DebugLog("ptrace inject: path translation failed");
+        DeleteFileW(outW.c_str());
+        return false;
+    }
+    DebugLog("ptrace inject: inj=" + injU + " loader=" + loaderU + " self=" + selfU + " pid=" + std::to_string(c.pid));
+
+    std::string script = std::string("INJ=") + ShellQuote(injU)
+        + "\nLOADER=" + ShellQuote(loaderU)
+        + "\nSELF=" + ShellQuote(selfU)
+        + "\nTARGET=" + std::to_string(c.pid)
+        + "\nOUT=" + ShellQuote(outU)
+        + "\n" + kInjectScript;
+    std::wstring scriptW = base + L".sh";
+    if (!WriteAll(scriptW, script)) {
+        DeleteFileW(outW.c_str());
+        return false;
+    }
+    std::string scriptU = ToUnixPath(scriptW);
+    std::wstring sh = ToDosPath("/bin/sh");
+    std::wstring cmd = L"\"" + sh + L"\" \"" + utf8_to_utf16(scriptU.c_str()) + L"\"";
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    bool started = CreateProcessW(sh.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) != 0;
+    if (!started) {
+        DebugLog("ptrace inject: CreateProcessW(/bin/sh) failed, error " + std::to_string(GetLastError()));
+    } else {
+        DWORD start = GetTickCount();
+        for (;;) {
+            if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) break;
+            if (HasDone(ReadAll(outW))) break;
+            if (GetTickCount() - start > 60000) {
+                DebugLog("ptrace inject: helper timed out");
+                break;
+            }
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    std::string out = ReadAll(outW);
+    std::string log = ReadAll(logW);
+    if (!log.empty()) DebugLog("ptrace inject log:\n" + log);
+    result.ran = started;
+    for (const auto& line : SplitLines(out)) {
+        if (line == "RC 0") result.success = true;
+        else if (line == "RC 3") result.ptraceDenied = true;
+        else if (line.rfind("ERR ", 0) == 0) DebugLog(line.substr(4));
+    }
+    DeleteFileW(scriptW.c_str());
+    DeleteFileW(outW.c_str());
+    DeleteFileW(logW.c_str());
+    return started;
+}
+
 std::vector<std::string> SplitLines(const std::string& text) {
     std::vector<std::string> lines;
     size_t pos = 0;
@@ -592,6 +736,7 @@ std::vector<Candidate> ParseCandidates(const std::string& out) {
 std::set<int> g_tried; // Unix PIDs already attempted (non-manual polling only)
 ULONGLONG g_lastScan = 0;
 bool g_scannedOnce = false;
+bool g_ptraceDenied = false; // last attach round was blocked by ptrace permissions
 
 } // namespace
 
@@ -684,14 +829,28 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
         }
 
         DebugLog("applying to " + c.name + " (pid " + std::to_string(c.pid) + ") in Wine prefix " + prefix + (c.otherNs ? " [other namespace]" : ""));
-        ScriptResult apply;
-        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply);
-
         bool success = false;
-        for (const auto& line : SplitLines(apply.out)) {
-            if (line == "RC 0") success = true;
-            else if (line.rfind("ERR ", 0) == 0) DebugLog(line.substr(4));
+        bool ran = false;
+        bool ptraceDenied = false;
+        {
+            // Preferred: ptrace-based injection (no second Wine process, no
+            // container dance). Falls back to the script below on failure.
+            InjectResult injected;
+            if (TryPtraceInject(c, injected)) {
+                ran = true;
+                success = injected.success;
+                ptraceDenied = injected.ptraceDenied;
+            }
         }
+        if (!success) {
+            ScriptResult apply;
+            ran = RunScript("apply", c.pid, c.otherNs, 120000, apply);
+            for (const auto& line : SplitLines(apply.out)) {
+                if (line == "RC 0") success = true;
+                else if (line.rfind("ERR ", 0) == 0) DebugLog(line.substr(4));
+            }
+        }
+        g_ptraceDenied |= ptraceDenied;
         handled = true;
         DebugLog(std::string("apply result: ran=") + (ran ? "1" : "0") + " success=" + (success ? "1" : "0"), true);
         if (ran && success) {
@@ -701,7 +860,12 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
             }
         } else {
             if (prompted) *prompted = true;
-            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
+            std::string text = S(THPRAC_PR_ERR_ATTACH);
+            if (g_ptraceDenied && S(THPRAC_WINE_PTRACE_CAP)) {
+                text += "\n\n";
+                text += S(THPRAC_WINE_PTRACE_CAP);
+            }
+            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), text.c_str());
         }
     }
     if (!handled) DebugLog("no cross-prefix game handled", true);

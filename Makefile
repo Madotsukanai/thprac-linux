@@ -22,6 +22,8 @@ BIN_FT     := $(BUILD_DIR)/bin/freetype.dll
 BIN_BRIDGE := $(BUILD_DIR)/bin/thprac_bridge64.exe
 
 INTEGRATED_EXE := $(DIST_DIR)/thprac-linux.exe
+INJECTOR_EXE := $(LAUNCHER_BUILD)/payload/thprac-injector
+WINLOADER_DLL := $(LAUNCHER_BUILD)/payload/thprac_wineloader.dll
 
 .PHONY: all clean
 .DEFAULT_GOAL := all
@@ -31,6 +33,14 @@ $(BUILD_DIR):
 
 $(LOC_JSON_EXE): $(LOC_JSON_SRC) | $(BUILD_DIR)
 	$(MINGW64_CXX) -Ithprac/src/3rdParties/yyjson -O2 -std=c++20 -municode $(LOC_JSON_SRC) -o $@ -static
+
+$(INJECTOR_EXE): tools/thprac_injector.c | $(LAUNCHER_BUILD)
+	mkdir -p $(LAUNCHER_BUILD)/payload
+	$(CC) -O2 -static -Wall -o $@ $<
+
+$(WINLOADER_DLL): thprac/src/thprac/thprac_wineloader.cpp | $(LAUNCHER_BUILD)
+	mkdir -p $(LAUNCHER_BUILD)/payload
+	$(MINGW64_CXX) -O2 -shared -DTHPRAC_WINLOADER -static -static-libgcc -static-libstdc++ -o $@ $< -lkernel32
 
 $(BUILD_DIR)/.locale: $(LOC_JSON_EXE) thprac/src/thprac/thprac_games_def.json
 	$(WINE) $(LOC_JSON_EXE) thprac/src/thprac
@@ -106,7 +116,7 @@ $(FT32_LIB): $(TOOLCHAIN32) | $(LAUNCHER_BUILD)
 
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) $(INJECTOR_EXE) $(WINLOADER_DLL) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
 	cp $(BIN_FT) $(LAUNCHER_BUILD)/payload/freetype.dll

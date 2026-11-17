@@ -25,6 +25,11 @@
         "Failed to apply thprac.",
         "thpracの適用に失敗しました。"
       ],
+      "THPRAC_WINE_PTRACE_CAP": [
+        "ptrace 被系统限制。只需执行一次以下命令即可启用跨前缀注入：\nsudo setcap cap_sys_ptrace=ep ~/.cache/thprac-wine/thprac-injector",
+        "ptrace is restricted by the system. Run the following once to enable cross-prefix injection:\nsudo setcap cap_sys_ptrace=ep ~/.cache/thprac-wine/thprac-injector",
+        "ptrace がシステムによって制限されています。一度だけ次のコマンドを実行するとクロスプレフィックス注入が有効になります:\nsudo setcap cap_sys_ptrace=ep ~/.cache/thprac-wine/thprac-injector"
+      ],
 
       "THPRAC_LAUNCHER": [ "thprac-linux - 东方游戏启动器", "thprac-linux - Touhou Game Launcher", "thprac-linux - 東方ゲームランチャー" ],
       "TH06NC_UNOFFICIAL": [ "非官方分支", "Unofficial fork", "非公式フォーク" ],
