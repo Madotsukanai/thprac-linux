@@ -186,7 +186,90 @@ wchar_t* NextCommandLineParam(wchar_t* cmdline, wchar_t* out) {
 }
 
 using namespace THPrac;
+
+// Steam preloads its game overlay renderer (gameoverlayrenderer*.so) through
+// LD_PRELOAD into everything it starts, including this launcher when it is run
+// as a non-Steam-game shortcut. The overlay's X11 event hook can crash the
+// launcher (0xC0000005 inside gameoverlayrenderer.so, usually via
+// XCheckIfEvent from the message pump) as soon as a game window shows up, and
+// the launcher itself never needs the overlay. Strip it from the environment
+// and run ourselves again without it.
+static DWORD StripSteamOverlayAndRelaunch(bool* relaunched) {
+    *relaunched = false;
+    constexpr wchar_t marker[] = L"THPRAC_OVERLAY_STRIPPED";
+    wchar_t markerBuf[4] = {};
+    if (GetEnvironmentVariableW(marker, markerBuf, 4)) {
+        return 0; // already stripped
+    }
+
+    wchar_t preload[4096] = {};
+    DWORD len = GetEnvironmentVariableW(L"LD_PRELOAD", preload, 4096);
+    if (!len || len >= 4096) {
+        return 0;
+    }
+
+    wchar_t filtered[4096] = {};
+    size_t out = 0;
+    bool removed = false;
+    for (size_t i = 0; preload[i];) {
+        size_t j = i;
+        while (preload[j] && preload[j] != L':' && preload[j] != L' ') j++;
+        size_t entryLen = j - i;
+        if (entryLen) {
+            bool overlay = false;
+            for (size_t k = 0; k + 19 <= entryLen; k++) {
+                if (_wcsnicmp(preload + i + k, L"gameoverlayrenderer", 19) == 0) {
+                    overlay = true;
+                    break;
+                }
+            }
+            if (overlay) {
+                removed = true;
+            } else {
+                if (out) filtered[out++] = L':';
+                wmemcpy(filtered + out, preload + i, entryLen);
+                out += entryLen;
+            }
+        }
+        i = j;
+        while (preload[i] == L':' || preload[i] == L' ') i++;
+    }
+    if (!removed) {
+        return 0;
+    }
+
+    if (out) {
+        SetEnvironmentVariableW(L"LD_PRELOAD", filtered);
+    } else {
+        SetEnvironmentVariableW(L"LD_PRELOAD", nullptr);
+    }
+    SetEnvironmentVariableW(marker, L"1");
+
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, (DWORD)std::size(self));
+
+    STARTUPINFOW si = {
+        .cb = sizeof(si),
+    };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(self, GetCommandLineW(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        return 0; // fall through and run with the overlay still loaded
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    *relaunched = true;
+    return code;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    bool relaunched = false;
+    DWORD relaunchCode = StripSteamOverlayAndRelaunch(&relaunched);
+    if (relaunched) {
+        return (int)relaunchCode;
+    }
     InitConfigDir();
     LoadSettings();
 
