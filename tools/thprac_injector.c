@@ -26,8 +26,10 @@
  * Diagnostics go to stderr.
  */
 #define _GNU_SOURCE
+#define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <time.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -492,25 +494,38 @@ static int hijack_call(pid_t tid, uint64_t func, uint64_t rcx, uint64_t rdx, uin
 
 /* Wine processes expose the PE exe as /proc/pid/exe, so detect Wine by the
  * maps signatures instead: the builtin PE ntdll.dll mapping tells both that
- * this is Wine and which PE architecture the process runs. */
-static int target_is_wine64(pid_t pid, int* unsupported32) {
+ * this is Wine and which PE architecture the process runs.
+ *
+ * Modern Wine runs 32-bit games under wow64: one 64-bit process containing
+ * BOTH the i386-windows PE parts (the actual game) and the x86_64-windows PE
+ * parts (the 64-bit host side, with its own ntdll/kernel32). In that case we
+ * drive the 64-bit side: load a 64-bit loader DLL, which starts the regular
+ * 32-bit thprac helper in the same container.
+ */
+static int target_arch(pid_t pid, int* unsupported32, int* wow64) {
     *unsupported32 = 0;
+    *wow64 = 0;
     static struct region regions[2048];
     int n = read_maps(pid, regions, 2048);
     if (n <= 0) return 0;
+    int has64 = 0, has32 = 0, wine = 0;
     for (int i = 0; i < n; i++) {
         if (!regions[i].path[0]) continue;
-        if (strstr(regions[i].path, "/x86_64-windows/ntdll.dll")) return 1;
-        if (strstr(regions[i].path, "/i386-windows/ntdll.dll")) {
-            *unsupported32 = 1;
-            return 0;
-        }
+        if (strstr(regions[i].path, "/x86_64-windows/ntdll.dll")) has64 = 1;
+        if (strstr(regions[i].path, "/i386-windows/ntdll.dll")) has32 = 1;
+        if (strstr(regions[i].path, "wine-preloader")) wine = 1;
     }
-    /* A freshly started wine process may not have ntdll mapped yet. */
-    for (int i = 0; i < n; i++) {
-        if (strstr(regions[i].path, "wine-preloader") || strstr(regions[i].path, "/wine")) return 0;
+    if (has64) {
+        *wow64 = has32;
+        return 1;
     }
-    return 0;
+    if (has32) {
+        /* Old-style 32-bit Wine process: the whole process is ELF32. */
+        *unsupported32 = 1;
+        return 0;
+    }
+    (void)wine;
+    return 0; /* not ready yet or not a Wine process */
 }
 
 /* ------------------------------------------------------------------ */
@@ -520,6 +535,197 @@ static int target_is_wine64(pid_t pid, int* unsupported32) {
 static void usage(void) {
     say("usage: thprac-injector --pid <pid> --dll <DOS path> [--wait <sec>]\n"
         "       thprac-injector --spawn '<command>' --dll <DOS path>   (test mode)");
+}
+
+/* ------------------------------------------------------------------ */
+/* Fork-follow tracer (spawn mode)                                     */
+/*                                                                     */
+/* Wine's launcher daemonizes the game process (start.exe /exec forks   */
+/* and exits), so the game is not a descendant of this process and yama */
+/* ptrace_scope=1 denies ptrace. Instead we trace the whole launch      */
+/* chain: our own child is followed through fork/clone events (auto     */
+/* traced descendants inherit our tracer authority), and when the game  */
+/* execs we keep it traced.                                             */
+/* ------------------------------------------------------------------ */
+#define THPRAC_MAX_TRACEES 64
+static pid_t g_tracees[THPRAC_MAX_TRACEES];
+static int g_ntracees = 0;
+
+static uint64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int known_tracee(pid_t t) {
+    for (int i = 0; i < g_ntracees; i++)
+        if (g_tracees[i] == t) return 1;
+    return 0;
+}
+
+static void add_tracee(pid_t t) {
+    if (known_tracee(t)) return;
+    if (g_ntracees < THPRAC_MAX_TRACEES) g_tracees[g_ntracees++] = t;
+}
+
+static void remove_tracee(pid_t t) {
+    for (int i = 0; i < g_ntracees; i++)
+        if (g_tracees[i] == t) {
+            g_tracees[i] = g_tracees[--g_ntracees];
+            return;
+        }
+}
+
+static void set_follow_opts(pid_t t) {
+    ptrace(PTRACE_SETOPTIONS, t, 0,
+        (void*)(uintptr_t)(PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC));
+}
+
+/* Reap all pending stops: newly traced descendants are adopted, options are
+ * set and everyone is resumed. Used while waiting for the game to initialize. */
+/* Reap all pending stops: newly traced descendants are adopted, options are
+ * set and everyone is resumed. Unrelated signals are passed through (Wine's
+ * wineserver IPC relies on SIGUSR1 etc.); only ptrace artifacts are swallowed. */
+static void resume_tracee(pid_t got, int status) {
+    int event = status >> 16;
+    int sig = WSTOPSIG(status);
+    if (event != 0 || sig == SIGTRAP || sig == SIGSTOP)
+        ptrace(PTRACE_CONT, got, 0, 0);
+    else
+        ptrace(PTRACE_CONT, got, 0, (void*)(uintptr_t)sig);
+}
+
+static void drain_events(int ms) {
+    uint64_t until = now_ms() + (uint64_t)ms;
+    for (;;) {
+        int status = 0;
+        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
+        if (got == 0) {
+            if (now_ms() >= until) return;
+            usleep(20000);
+            continue;
+        }
+        if (got < 0) return;
+        if (WIFSTOPPED(status)) {
+            add_tracee(got);
+            set_follow_opts(got);
+            if (getenv("THPRAC_INJ_DEBUG"))
+                say("drain: adopted %d (sig=%d event=%x)", got, WSTOPSIG(status), status >> 16);
+            resume_tracee(got, status);
+        } else {
+            remove_tracee(got);
+        }
+    }
+}
+
+/* Detach every remaining tracee so the target (and its siblings) resume. */
+static void detach_all(void) {
+    for (int i = 0; i < g_ntracees; i++)
+        ptrace(PTRACE_DETACH, g_tracees[i], 0, 0);
+    g_ntracees = 0;
+}
+
+/* Stop every thread of the traced game process (SIGSTOP on a traced process
+ * comes to us as a group-stop) and return the list of stopped tids. */
+static int stop_process(pid_t pid, pid_t* tids, int max) {
+    kill(pid, SIGSTOP);
+    int n = 0;
+    uint64_t until = now_ms() + 2000;
+    for (;;) {
+        int status = 0;
+        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
+        if (got == 0) {
+            if (n > 0 || now_ms() >= until) break;
+            usleep(10000);
+            continue;
+        }
+        if (got < 0) break;
+        if (WIFSTOPPED(status)) {
+            int dup = 0;
+            for (int i = 0; i < n; i++) if (tids[i] == got) dup = 1;
+            if (!dup && n < max) tids[n++] = got;
+        } else {
+            remove_tracee(got);
+        }
+        if (now_ms() >= until) break;
+    }
+    /* Reap a bit more so late threads are included. */
+    uint64_t until2 = now_ms() + 300;
+    for (;;) {
+        int status = 0;
+        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
+        if (got == 0) {
+            if (now_ms() >= until2) break;
+            usleep(10000);
+            continue;
+        }
+        if (got < 0) break;
+        if (WIFSTOPPED(status)) {
+            int dup = 0;
+            for (int i = 0; i < n; i++) if (tids[i] == got) dup = 1;
+            if (!dup && n < max) tids[n++] = got;
+        } else {
+            remove_tracee(got);
+        }
+    }
+    return n;
+}
+
+static int pid_matches_target(pid_t pid, const char* exe_token, int* unsupported32, int* wow64) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[1024] = {};
+    ssize_t got = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (got <= 0) return 0;
+    /* The wine process command line shows the DOS form (Z:\...). Match on the
+     * basename in either form, and require the game image to actually be
+     * mapped (this skips wine's intermediate start.exe stages). */
+    const char* base = strrchr(exe_token, '/');
+    base = base ? base + 1 : exe_token;
+    if (!strstr(buf, base)) return 0;
+    /* Prefer processes from our own prefix (spawn mode). */
+    if (getenv("WINEPREFIX")) {
+        char envpath[64];
+        snprintf(envpath, sizeof(envpath), "/proc/%d/environ", pid);
+        int efd = open(envpath, O_RDONLY);
+        if (efd >= 0) {
+            static char ebuf[32768];
+            size_t eoff = 0;
+            for (;;) {
+                if (eoff >= sizeof(ebuf) - 1) break;
+                ssize_t cg = read(efd, ebuf + eoff, sizeof(ebuf) - 1 - eoff);
+                if (cg <= 0) break;
+                eoff += (size_t)cg;
+            }
+            close(efd);
+            const char* wp = getenv("WINEPREFIX");
+            if (!eoff || !wp || !strstr(ebuf, wp)) return 0;
+        }
+    }
+    snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    static char maps[262144];
+    size_t off = 0;
+    for (;;) {
+        if (off >= sizeof(maps) - 1) break;
+        ssize_t cg = read(fd, maps + off, sizeof(maps) - 1 - off);
+        if (cg <= 0) break;
+        off += (size_t)cg;
+    }
+    close(fd);
+    maps[off] = 0;
+    if (!off) return 0;
+    if (!strstr(maps, base)) {
+        if (getenv("THPRAC_INJ_DEBUG")) say("spawn: pid %d cmdline ok but image not in maps", pid);
+        return 0;
+    }
+    int r = target_arch(pid, unsupported32, wow64);
+    if (getenv("THPRAC_INJ_DEBUG")) say("spawn: pid %d image mapped, arch=%d unsupported32=%d wow64=%d", pid, r, *unsupported32, *wow64);
+    return r;
 }
 
 static pid_t spawn_target(const char* cmdline) {
@@ -541,21 +747,102 @@ static pid_t spawn_target(const char* cmdline) {
     free(cmd);
     /* Wait for the exec-stop. */
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return -1;
-    if (!WIFSTOPPED(status)) return -1;
-    say("spawn: exec-stop ok");
-    /* Let it run (we are tracing, so detach first). */
-    ptrace(PTRACE_DETACH, pid, 0, 0);
-    /* Wait until the loader chain reaches a wine process with ntdll mapped. */
-    for (int i = 0; i < 100; i++) {
-        int unsupported32 = 0;
-        if (target_is_wine64(pid, &unsupported32)) {
-            say("spawn: wine detected after %d ms", i * 100);
-            return pid;
-        }
-        usleep(100000);
+    if (waitpid(pid, &status, 0) < 0) {
+        say_errno("spawn: waitpid");
+        return -1;
     }
-    return -2;
+    if (!WIFSTOPPED(status)) {
+        say("spawn: no exec-stop (status=%x exited=%d code=%d sig=%d)", status, WIFEXITED(status),
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1, WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+        return -1;
+    }
+    say("spawn: exec-stop ok");
+    /* Fork-follow: keep tracing so auto-traced descendants (start.exe, the
+     * game process) inherit our tracer authority even after reparenting. */
+    add_tracee(pid);
+    set_follow_opts(pid);
+    ptrace(PTRACE_CONT, pid, 0, 0);
+
+    /* The game execs in a descendant process; find it via its command line
+     * and mapped image. */
+    const char* exe_token = strrchr(cmdline, ' ');
+    exe_token = exe_token ? exe_token + 1 : cmdline;
+    uint64_t deadline = now_ms() + 30000;
+    for (;;) {
+        int status2 = 0;
+        pid_t got = waitpid(-1, &status2, __WALL | WNOHANG);
+        if (got == 0) {
+            if (now_ms() > deadline) {
+                say("spawn: timeout waiting for the game process");
+                detach_all();
+                return -2;
+            }
+            /* No event pending: poll known tracees for one whose image is
+             * mapped and matching (the game image is mapped by the preloader
+             * after the exec-stop, so the exec event itself is too early). */
+            for (int i = 0; i < g_ntracees; i++) {
+                int unsupported32 = 0, wow64 = 0;
+                int dbg = getenv("THPRAC_INJ_DEBUG") && (now_ms() / 1000) % 3 == 0;
+                if (dbg) {
+                    char cpath[64];
+                    snprintf(cpath, sizeof(cpath), "/proc/%d/cmdline", g_tracees[i]);
+                    int cfd = open(cpath, O_RDONLY);
+                    char cbuf[128] = {};
+                    if (cfd >= 0) { ssize_t cg = read(cfd, cbuf, 127); if (cg > 0) for (ssize_t z = 0; z < cg; z++) if (cbuf[z] == 0) cbuf[z] = ' '; close(cfd); }
+                    say("spawn: poll %d cmd=%s", g_tracees[i], cbuf);
+                }
+                if (pid_matches_target(g_tracees[i], exe_token, &unsupported32, &wow64)) {
+                    pid_t game = g_tracees[i];
+                    say("spawn: game process %d found%s", game, wow64 ? " (wow64)" : "");
+                    kill(game, SIGSTOP);
+                    int st3 = 0;
+                    while (waitpid(game, &st3, __WALL) != game) {}
+                    for (int j = 0; j < g_ntracees; j++)
+                        if (g_tracees[j] != game) ptrace(PTRACE_DETACH, g_tracees[j], 0, 0);
+                    g_tracees[0] = game;
+                    g_ntracees = 1;
+                    return game;
+                }
+            }
+            usleep(20000);
+            continue;
+        }
+        if (got < 0) {
+            say_errno("spawn: waitpid(-1)");
+            return -1;
+        }
+        if (WIFEXITED(status2) || WIFSIGNALED(status2)) {
+            remove_tracee(got);
+            continue;
+        }
+        if (!WIFSTOPPED(status2)) continue;
+        if (!known_tracee(got)) {
+            add_tracee(got);
+            set_follow_opts(got);
+        }
+        int event = status2 >> 16;
+        if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_CLONE) {
+            if (getenv("THPRAC_INJ_DEBUG")) say("spawn: %d forked/cloned", got);
+            ptrace(PTRACE_CONT, got, 0, 0);
+            continue;
+        }
+        /* Any other stop (exec event, group-stop, signal): is this the game? */
+        {
+            int unsupported32 = 0, wow64 = 0;
+            if (pid_matches_target(got, exe_token, &unsupported32, &wow64)) {
+                say("spawn: game process %d found%s", got, wow64 ? " (wow64)" : "");
+                /* Detach the rest of the chain; keep only the game traced. */
+                for (int i = 0; i < g_ntracees; i++)
+                    if (g_tracees[i] != got) ptrace(PTRACE_DETACH, g_tracees[i], 0, 0);
+                g_tracees[0] = got;
+                g_ntracees = 1;
+                return got;
+            }
+            if (getenv("THPRAC_INJ_DEBUG"))
+                say("spawn: event %x sig %d from %d (not the game)", event, WSTOPSIG(status2), got);
+        }
+        resume_tracee(got, status2);
+    }
 }
 
 /* Is rip inside one of the target's PE module ranges? A thread stopped there
@@ -644,17 +931,75 @@ int main(int argc, char** argv) {
         say("spawned target pid %d", pid);
     }
 
-    int unsupported32 = 0;
-    if (!target_is_wine64(pid, &unsupported32)) {
-        say("pid %d is not a 64-bit Wine process (exe link unreadable or unsupported)", pid);
+    int unsupported32 = 0, wow64 = 0;
+    if (!target_arch(pid, &unsupported32, &wow64)) {
+        say("pid %d is not a supported Wine process%s", pid,
+            unsupported32 ? " (old-style 32-bit Wine is not supported; wow64 is required)" : "");
         return unsupported32 ? 4 : 2;
     }
+    say("target is %s", wow64 ? "wow64 (32-bit game, 64-bit host side)" : "64-bit");
 
-    /* Seize a thread that is safely injectable: stopped in PE user-mode code
-     * with no wineserver transaction in flight. */
     struct user_regs_struct saved;
     memset(&saved, 0, sizeof(saved));
     pid_t tid = 0;
+    if (spawned) {
+        /* The game process is already traced by our fork-follow tracer (it is
+         * stopped at its exec-stop). Resume it and wait for the 64-bit PE side
+         * to come up, then stop the whole process and pick a hijack thread. */
+        set_follow_opts(pid);
+        ptrace(PTRACE_CONT, pid, 0, 0);
+        static struct region scan0[4096];
+        const char* token = strrchr(spawn, ' ');
+        token = token ? token + 1 : spawn;
+        const char* tbase = strrchr(token, '/');
+        tbase = tbase ? tbase + 1 : token;
+        int ready = 0;
+        for (int i = 0; i < 600 && !ready; i++) {
+            int n_scan0 = read_maps(pid, scan0, 4096);
+            for (int j = 0; j < n_scan0; j++) {
+                if (scan0[j].path[0] && strstr(scan0[j].path, "/x86_64-windows/ntdll.dll") &&
+                    strstr(scan0[j].path, tbase)) {
+                    ready = 1;
+                    break;
+                }
+            }
+            if (!ready) {
+                drain_events(80);
+            }
+        }
+        if (!ready) {
+            say("spawn: loader never became ready");
+            detach_all();
+            return 2;
+        }
+        for (int round = 0; round < 60 && !tid; round++) {
+            pid_t tids[128];
+            int n = stop_process(pid, tids, 128);
+            static struct region scan[4096];
+            int n_scan = read_maps(pid, scan, 4096);
+            struct range pes[512];
+            int n_pes = collect_pe_ranges(scan, n_scan, pes, 512);
+            for (int i = 0; i < n; i++) {
+                struct user_regs_struct r;
+                if (get_regs(tids[i], &r) < 0) continue;
+                if ((r.cs & 0xffff) != 0x33 || !rip_in_pe(r.rip, pes, n_pes)) continue;
+                tid = tids[i];
+                saved = r;
+                break;
+            }
+            if (!tid) {
+                /* Resume everyone briefly and try again. */
+                for (int i = 0; i < n; i++) ptrace(PTRACE_CONT, tids[i], 0, 0);
+                drain_events(150);
+            }
+        }
+        if (!tid) {
+            say("no injectable thread found in pid %d", pid);
+            detach_all();
+            return 2;
+        }
+        say("stopped tid %d (fork-follow)", tid);
+    } else
     for (int round = 0; round < 60 && !tid; round++) {
         static struct region scan[4096];
         int n_scan = read_maps(pid, scan, 4096);
@@ -679,7 +1024,6 @@ int main(int argc, char** argv) {
     say("seized tid %d", tid);
 
     int result_code = 7;
-    uint64_t mmap_addr = 0;
 
     do {
         struct user_regs_struct cur;
@@ -689,40 +1033,37 @@ int main(int argc, char** argv) {
         }
         (void)cur;
 
-        /* Wait until kernel32/ntdll are mapped (fresh processes need a moment). */
+        /* Wait until the 64-bit PE side is mapped (fresh processes need a moment). */
         static struct region regions[4096];
         int n_regions = 0;
-        uint64_t k32 = 0, ntdll = 0;
+        uint64_t ntdll = 0;
         for (int i = 0; i <= wait_secs * 20; i++) {
             n_regions = read_maps(pid, regions, 4096);
             if (n_regions > 0) {
-                if (module_base(regions, n_regions, "/i386-windows/ntdll.dll")) {
-                    say("32-bit PE parts found (wow64); only x86_64 targets are supported");
-                    result_code = 4;
-                    break;
-                }
-                k32 = module_base(regions, n_regions, "/x86_64-windows/kernel32.dll");
                 ntdll = module_base(regions, n_regions, "/x86_64-windows/ntdll.dll");
-                if (k32 && ntdll) break;
+                if (ntdll) break;
             }
             if (i == wait_secs * 20) break;
             usleep(50000);
         }
-        if (result_code == 4) break;
-        if (!k32 || !ntdll) {
+        if (!ntdll) {
             say("kernel32/ntdll not found in maps (loader not ready)");
             result_code = 5;
             break;
         }
-        say("kernel32 @ %llx, ntdll @ %llx", (unsigned long long)k32, (unsigned long long)ntdll);
+        say("ntdll @ %llx", (unsigned long long)ntdll);
 
-        uint64_t load_library_w = pe_export(pid, k32, "LoadLibraryW");
-        if (!load_library_w) {
-            say("LoadLibraryW not found in kernel32 exports");
+        /* We always drive the 64-bit side: LdrLoadDll from the 64-bit ntdll
+         * loads our 64-bit loader DLL both into pure 64-bit targets and into
+         * wow64 hosts of 32-bit games (the loader then starts the regular
+         * 32-bit thprac helper inside the same container). */
+        uint64_t ldr_load_dll = pe_export(pid, ntdll, "LdrLoadDll");
+        if (!ldr_load_dll) {
+            say("LdrLoadDll not found in ntdll exports");
             result_code = 5;
             break;
         }
-        say("LoadLibraryW @ %llx", (unsigned long long)load_library_w);
+        say("LdrLoadDll @ %llx", (unsigned long long)ldr_load_dll);
 
         /* Return trampoline: use an existing int3 in an exec region. */
         uint64_t ret_site = find_int3(pid, regions, n_regions);
@@ -750,31 +1091,51 @@ int main(int argc, char** argv) {
             break;
         }
 
-        /* Write the DLL path as UTF-16 at work+0x100. */
+        /* Write the DLL path as UTF-16 at work+0x100 and build a
+         * UNICODE_STRING at work+0x800, plus flags at work+0x820 and the
+         * module handle out-slot at work+0x828. */
         uint16_t wpath[1024];
         size_t wlen = utf8_to_utf16(dll, wpath, 1024);
         if (!write_cstr16(pid, work + 0x100, wpath, wlen)) {
             say_errno("write path");
             break;
         }
+        {
+            uint8_t us[16] = {};
+            uint16_t chars = (uint16_t)(wlen - 1); /* excluding L'\0' */
+            us[0] = (uint8_t)(chars * 2);        /* Length */
+            us[2] = (uint8_t)((chars + 1) * 2);  /* MaximumLength */
+            uint64_t bufptr = work + 0x100;
+            memcpy(us + 8, &bufptr, 8);          /* Buffer */
+            uint64_t flags = 0, handle = 0;
+            if (!write_mem_ok(pid, work + 0x800, us, 16) ||
+                !write_mem_ok(pid, work + 0x820, &flags, 8) ||
+                !write_mem_ok(pid, work + 0x828, &handle, 8)) {
+                say_errno("write UNICODE_STRING");
+                break;
+            }
+        }
 
-        /* Call LoadLibraryW(path). */
+        /* Call LdrLoadDll(search_path=NULL, &flags, &us, &handle). */
         if (dry) {
-            say("dry run: skipping LoadLibraryW");
+            say("dry run: skipping LdrLoadDll");
             result_code = 0;
             break;
         }
         uint64_t call_result = 0;
-        if (hijack_call(tid, load_library_w, work + 0x100, 0, 0, 0, NULL, 0, ret_site, &saved, &work, &call_result) < 0) {
-            say("LoadLibraryW call failed");
+        if (hijack_call(tid, ldr_load_dll, 0, work + 0x820, work + 0x800, work + 0x828, NULL, 0, ret_site, &saved, &work, &call_result) < 0) {
+            say("LdrLoadDll call failed");
             break;
         }
-        if (!call_result) {
-            say("LoadLibraryW returned NULL (module not loaded; check the path)");
+        if ((int64_t)call_result != 0) {
+            say("LdrLoadDll failed: status %08llx (module not loaded; check the path)",
+                (unsigned long long)call_result);
             result_code = 6;
             break;
         }
-        say("module loaded at %llx", (unsigned long long)call_result);
+        uint64_t handle = 0;
+        read_mem(pid, work + 0x828, &handle, 8);
+        say("module loaded at %llx", (unsigned long long)handle);
 
         /* Verify the module is visible in maps (basename match). */
         {
@@ -795,6 +1156,7 @@ int main(int argc, char** argv) {
     set_regs(tid, &saved);
     ptrace(PTRACE_DETACH, tid, 0, 0);
     say("detached tid %d", tid);
+    if (spawned) detach_all();
 
     if (result_code != 0) {
         say("injection failed (code %d)", result_code);

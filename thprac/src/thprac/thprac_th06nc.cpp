@@ -4,7 +4,6 @@
 #endif
 
 #ifdef THPRAC_TH06NC_BRIDGE
-// Bridge process launcher (injected, extracts payloads and starts th06nc).
 
 #include <tlhelp32.h>
 #include <shellapi.h>
