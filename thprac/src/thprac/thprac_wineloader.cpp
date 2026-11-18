@@ -43,6 +43,12 @@ DWORD WINAPI SpawnThread(void*) {
     *sep = 0; // self now holds the directory
     wchar_t* base = sep + 1;
 
+    // This DLL runs inside the game process, so its pid is the target pid.
+    // The cfg command may contain {pid} placeholders, which lets it drive a
+    // native (non-Wine) helper such as thprac-injector --pid {pid}.
+    wchar_t pidText[16];
+    wsprintfW(pidText, L"%lu", GetCurrentProcessId());
+
     // Remove any stale result file.
     wchar_t result[32768];
     lstrcpynW(result, self, 32000);
@@ -87,6 +93,19 @@ DWORD WINAPI SpawnThread(void*) {
     if (!cmd[0]) {
         WriteResult(self, L"err config-empty");
         return 2;
+    }
+    // Substitute {pid} (the host process = the game).
+    {
+        wchar_t* out = cmd;
+        for (wchar_t* p = cmd; *p;) {
+            if (p[0] == L'{' && p[1] == L'p' && p[2] == L'i' && p[3] == L'd' && p[4] == L'}') {
+                for (wchar_t* d = pidText; *d;) *out++ = *d++;
+                p += 5;
+            } else {
+                *out++ = *p++;
+            }
+        }
+        *out = 0;
     }
     if (envStart) {
         // envStart points into cmd's buffer; process each line in place.
@@ -133,6 +152,22 @@ DWORD WINAPI SpawnThread(void*) {
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
+    // A native helper (--result) may already have written the final status
+    // (as UTF-8); never clobber a definitive result with our optimistic one.
+    {
+        unsigned char rbytes[16] = {};
+        HANDLE rf = CreateFileW(result, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (rf != INVALID_HANDLE_VALUE) {
+            DWORD rgot = 0;
+            ReadFile(rf, rbytes, sizeof(rbytes), &rgot, nullptr);
+            CloseHandle(rf);
+            // The injector writes UTF-8 ("ok..."/"err ..."); our own writes
+            // are UTF-16LE (first byte 0x6F followed by 0x00), which will not
+            // match the ASCII check below.
+            if (rgot >= 2 && rbytes[0] == 'o' && rbytes[1] == 'k') return 0;
+            if (rgot >= 3 && rbytes[0] == 'e' && rbytes[1] == 'r' && rbytes[2] == 'r') return 0;
+        }
+    }
     WriteResult(self, code == STILL_ACTIVE ? L"ok" : (code == 0 ? L"ok" : L"started"));
     return 0;
 }

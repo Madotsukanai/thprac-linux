@@ -10,8 +10,6 @@
 #include <shlobj.h>
 #include <fstream>
 
-#define IDR_FREETYPE_DLL 101
-#define IDR_MODULE_DLL   102
 
 namespace {
 Shared* shared{}; HANDLE mapping{},mutex{}; DWORD targetPid{};
@@ -27,32 +25,6 @@ void log(const std::wstring& text) {
 }
 void failure(const std::wstring& text) { log(L"FAIL: "+text); MessageBoxW(nullptr,text.c_str(),L"thprac-linux",MB_ICONERROR); }
 void disconnect() { if(shared)UnmapViewOfFile(shared);if(mapping)CloseHandle(mapping);if(mutex)CloseHandle(mutex);shared=nullptr;mapping=nullptr;mutex=nullptr;targetPid=0; }
-bool writeResource(int id,const std::wstring& path) {
-    HRSRC res=FindResourceW(nullptr,MAKEINTRESOURCEW(id),RT_RCDATA); if(!res) return false;
-    HGLOBAL data=LoadResource(nullptr,res); DWORD size=SizeofResource(nullptr,res);
-    void* ptr=data?LockResource(data):nullptr; if(!ptr||!size) return false;
-    HANDLE f=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(f==INVALID_HANDLE_VALUE) return false; DWORD wrote=0; BOOL ok=WriteFile(f,ptr,size,&wrote,nullptr); CloseHandle(f);
-    return ok && wrote==size;
-}
-std::wstring payloadDir() {
-    static std::wstring dir; if(!dir.empty()) return dir;
-    wchar_t tmp[MAX_PATH+1]{}; DWORD n=GetTempPathW(MAX_PATH,tmp);
-    dir = (n?std::wstring(tmp):directory(executablePath())+L"\\") + L"thprac-linux\\";
-    CreateDirectoryW(dir.c_str(),nullptr);
-    // extract embedded deps if present; fall back to exe dir when not embedded
-    if(FindResourceW(nullptr,MAKEINTRESOURCEW(IDR_MODULE_DLL),RT_RCDATA)) {
-        bool a=writeResource(IDR_FREETYPE_DLL,dir+L"freetype.dll");
-        if(a) CopyFileW((dir+L"freetype.dll").c_str(),(dir+L"libfreetype.dll").c_str(),FALSE);
-        bool b=writeResource(IDR_MODULE_DLL,dir+L"thprac_th06nc.dll");
-        log(std::wstring(L"extract: ")+(a?L"ok":L"fail")+L","+(b?L"ok":L"fail")+L" -> "+dir);
-    } else {dir=directory(executablePath())+L"\\"; log(L"no embedded resources, using "+dir);
-      std::wstring ftSrc=dir+L"freetype.dll";
-      if(GetFileAttributesW(ftSrc.c_str())!=INVALID_FILE_ATTRIBUTES)
-        CopyFileW(ftSrc.c_str(),(dir+L"libfreetype.dll").c_str(),FALSE);
-    }
-    return dir;
-}
 const wchar_t* localized(int language,const wchar_t* zh,const wchar_t* en,const wchar_t* ja) {
     return language==0?zh:language==2?ja:en;
 }
@@ -182,10 +154,34 @@ uintptr_t remoteModule(DWORD pid,const std::wstring& name) {
     if(Module32FirstW(snapshot,&item))do{if(_wcsicmp(item.szModule,name.c_str())==0){result=(uintptr_t)item.modBaseAddr;break;}}while(Module32NextW(snapshot,&item));
     CloseHandle(snapshot);return result;
 }
+// Run the native ptrace injector shipped next to this executable. No
+// Windows-side cross-process calls: the injector discovers the game's Linux
+// pid by exe name and loads the module through ntdll!LdrLoadDll.
+bool RunLocalInjector(const std::wstring& dir,const std::wstring& dll) {
+    std::wstring inj=dir+L"thprac-injector";
+    if(GetFileAttributesW(inj.c_str())==INVALID_FILE_ATTRIBUTES){log(L"no injector at "+inj);return false;}
+    wchar_t tmp[MAX_PATH+1]{};DWORD n=GetTempPathW(MAX_PATH,tmp);
+    std::wstring res=(n?std::wstring(tmp):dir)+L"thprac_inj_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount())+L".res";
+    DeleteFileW(res.c_str());
+    std::wstring cmd=L"\""+inj+L"\" --find th06nc.exe --dll \""+dll+L"\" --sig --wait 20 --result \""+res+L"\"";
+    STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
+    wchar_t mut[4096];lstrcpynW(mut,cmd.c_str(),4095);
+    if(!CreateProcessW(inj.c_str(),mut,nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&pi)){log(L"injector spawn fail err="+std::to_wstring(GetLastError()));return false;}
+    CloseHandle(pi.hThread);
+    DWORD startTick=GetTickCount();
+    for(;;){if(WaitForSingleObject(pi.hProcess,500)==WAIT_OBJECT_0)break;if(GetTickCount()-startTick>90000)break;}
+    DWORD code=0;GetExitCodeProcess(pi.hProcess,&code);CloseHandle(pi.hProcess);
+    std::wstring resTxt;
+    HANDLE rf=CreateFileW(res.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+    if(rf!=INVALID_HANDLE_VALUE){wchar_t b[128]{};DWORD g=0;ReadFile(rf,b,254,&g,nullptr);CloseHandle(rf);resTxt.assign(b,g/2);}
+    DeleteFileW(res.c_str());
+    log(L"injector rc="+std::to_wstring((unsigned long long)code)+L" result="+resTxt);
+    return code==0;
+}
 bool attach(DWORD pid,const LaunchOptions& options) {
     if(shared){if(pid==targetPid)return true;disconnect();}
     LaunchOptions opts=options;
-    HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_CREATE_THREAD|PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,pid);
+    HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
     if(!process){failure(L"无法打开游戏进程，错误 "+std::to_wstring(GetLastError()));return false;}
     wchar_t path[32768];DWORD length=32768;
     log(std::wstring(L"attach pid=")+std::to_wstring(pid));
@@ -193,63 +189,20 @@ bool attach(DWORD pid,const LaunchOptions& options) {
     if(!QueryFullProcessImageNameW(process,0,path,&length)||(build=identifyBuild(path))==GameBuild::Unsupported){ log(std::wstring(L"unsupported: ")+path);
       CloseHandle(process);failure(L"EXE 的 SHA-256 不在已适配的新典版本中，未注入。");return false;}
     opts.build=(int)build; log(L"build="+std::to_wstring(opts.build));
+    // Options travel through the filesystem; the in-game module creates its
+    // own Shared mapping and mutex, so nothing has to be prepared here.
+    WriteLaunchOptionsFile(opts);
+    // Injection goes through the native ptrace injector (freetype first).
+    {
+      std::wstring base=directory(executablePath())+L"\\";
+      std::wstring dll=base+L"thprac_th06nc.dll";
+      if(GetFileAttributesW(dll.c_str())==INVALID_FILE_ATTRIBUTES){CloseHandle(process);failure(L"缺少 thprac_th06nc.dll");return false;}
+      if(!RunLocalInjector(base,dll)){CloseHandle(process);failure(L"注入失败或模块加载失败");return false;}
+    }
     {auto n=mapName(pid); log(std::wstring(L"open map: ")+n);}
     mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());
-    LaunchMapping launch;
-    HANDLE preMap{}, preMutex{};
-    if(!mapping) {
-      preMap=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mapName(pid).c_str());
-      preMutex=CreateMutexW(nullptr,FALSE,mutexName(pid).c_str());
-      log(std::wstring(L"preMap=")+std::to_wstring((uintptr_t)preMap)+L" preMutex="+std::to_wstring((uintptr_t)preMutex)+L" err="+std::to_wstring(GetLastError()));
-      if(!launch.create(pid,opts)){CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);failure(L"Unable to prepare the game launch options. Please close the game and try again.");return false;}
-      std::wstring base=payloadDir();
-      // ensure freetype.dll is findable as a dependency of thprac_th06nc.dll
-      {
-        std::wstring ftSrc=base+L"freetype.dll", gameDir=directory(path)+L"\\";
-        if(GetFileAttributesW(ftSrc.c_str())==INVALID_FILE_ATTRIBUTES){
-          for(auto name:{L"freetype.dll",L"libfreetype.dll"}){
-            std::wstring dst=gameDir+name;
-            CopyFileW(ftSrc.c_str(),dst.c_str(),FALSE);
-          }
-        }
-      }
-      for (const wchar_t* dependency : {L"libfreetype.dll", L"thprac_th06nc.dll"}) {
-      std::wstring dll=base+dependency;
-      if(GetFileAttributesW(dll.c_str())==INVALID_FILE_ATTRIBUTES){
-        // freetype may be named freetype.dll in payload
-        if(_wcsicmp(dependency,L"libfreetype.dll")==0) dll=base+L"freetype.dll";
-      }
-      if(GetFileAttributesW(dll.c_str())==INVALID_FILE_ATTRIBUTES){CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);failure(L"缺少 thprac_th06nc.dll / freetype.dll");return false;}
-      auto load=GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");
-      MEMORY_BASIC_INFORMATION info{};VirtualQuery((void*)load,&info,sizeof(info));
-      std::wstring localOwner=executablePath((HMODULE)info.AllocationBase);
-      auto ownerName=localOwner.substr(localOwner.find_last_of(L"\\")+1);
-      auto remoteOwner=remoteModule(pid,ownerName);
-      // Steam may expose the PID before its loader has populated the module
-      // list (ERROR_PARTIAL_COPY). Wait for LoadLibraryW's owning module;
-      // ASLR and process visibility alone do not imply injection readiness.
-      for(int i=0;!remoteOwner && i<250;++i) {
-        if(WaitForSingleObject(process,20)!=WAIT_TIMEOUT)break;
-        remoteOwner=remoteModule(pid,ownerName);
-      }
-      if(!remoteOwner){CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);failure(L"The game loader is not ready. Please launch the game again.");return false;}
-      auto remoteLoad=remoteOwner+((uintptr_t)load-(uintptr_t)info.AllocationBase);
-      SIZE_T bytes=(dll.size()+1)*sizeof(wchar_t);void* remote=VirtualAllocEx(process,nullptr,bytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-      SIZE_T written=0;bool ok=remote&&WriteProcessMemory(process,remote,dll.c_str(),bytes,&written)&&written==bytes;
-      HANDLE thread=ok&&remoteOwner?CreateRemoteThread(process,nullptr,0,(LPTHREAD_START_ROUTINE)remoteLoad,remote,0,nullptr):nullptr;
-      DWORD wait=thread?WaitForSingleObject(thread,10000):WAIT_FAILED;
-      DWORD exitCode=0; if(thread) GetExitCodeThread(thread,&exitCode);
-      if(thread)CloseHandle(thread);
-      // Do not free the argument if LoadLibrary is still using it.
-      if(remote&&wait!=WAIT_TIMEOUT)VirtualFreeEx(process,remote,0,MEM_RELEASE);
-      log(std::wstring(L"inject ")+dependency+L" wait="+std::to_wstring(wait)+L" err="+std::to_wstring(GetLastError())+L" ret="+std::to_wstring((unsigned long long)exitCode));
-      if(wait!=WAIT_OBJECT_0 || exitCode==0){CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);failure(L"注入失败或模块加载失败: "+std::wstring(dependency));return false;}
-      }
-      if(preMap){ mapping=preMap; preMap=nullptr; }
-      if(preMutex){ mutex=preMutex; preMutex=nullptr; }
-      if(!mapping) for(int i=0;i<400&&!mapping;i++){Sleep(50);mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());}
-      if(!mapping) log(L"mapping poll timeout err="+std::to_wstring(GetLastError()));
-    }
+    if(!mapping) for(int i=0;i<400&&!mapping;i++){Sleep(50);mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());}
+    if(!mapping) log(L"mapping poll timeout err="+std::to_wstring(GetLastError()));
     CloseHandle(process);
     if(!mapping){failure(L"DLL 未建立通信通道。");return false;}
     log(L"mapping opened");
@@ -3455,6 +3408,11 @@ DWORD WINAPI start(void*) {
             UnmapViewOfFile(view);
         }
         CloseHandle(options);
+    }
+    else if(ReadLaunchOptionsFile(launchOptions)) {
+        // Loaded by the native injector: no wineserver named object could be
+        // prepared, so the launcher handed the options over as a file.
+        DiagLog("launch options read from file");
     }
     language.store(launchOptions.language);
     auto mn=mapName(GetCurrentProcessId());

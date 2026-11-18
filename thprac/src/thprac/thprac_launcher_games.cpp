@@ -3,6 +3,7 @@
 #include "thprac_load_exe.h"
 #include "thprac_identify.h"
 #include "thprac_native.h"
+#include "thprac_wine_attach.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -390,6 +391,12 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
                 log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_GAMES_COMMAND_FAILED));
                 return false;
             }
+            // A containerized launcher cannot see other containers' processes,
+            // so the regular scan would never find the game we just launched;
+            // send the attach helper into the target app's container instead.
+            if (inst->apply_thprac && IsProtonContainer() && wcsstr(utf8_to_utf16(inst->path).c_str(), L"steam://")) {
+                WineAttach::DispatchSteamHook(utf8_to_utf16(inst->path).c_str(), game);
+            }
             return true;
         }
         if (inst->type != TYPE_STEAM) {
@@ -409,7 +416,18 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
             if (inst->apply_thprac) {
                 state->reflectiveLaunchID = game;
             }
-            ShellExecuteW(Gui::ImplWin32GetHwnd(), L"open", utf8_to_utf16(inst->path).c_str(), nullptr, nullptr, SW_SHOW);
+            // Steam entries hold steam:// URLs; dispatch them through the
+            // shared runner so containerized launchers can reach the host
+            // Steam client as well.
+            std::wstring target = utf8_to_utf16(inst->path);
+            if (target.find(L"steam://") != std::wstring::npos) {
+                bool ok = RunLaunchCommand(target.c_str());
+                if (ok && inst->apply_thprac && IsProtonContainer()) {
+                    WineAttach::DispatchSteamHook(target.c_str(), game);
+                }
+                return ok;
+            }
+            ShellExecuteW(Gui::ImplWin32GetHwnd(), L"open", target.c_str(), nullptr, nullptr, SW_SHOW);
             return true;
         }
     } else {
@@ -1979,7 +1997,7 @@ void LauncherGamesMain(LauncherState* state) {
             wchar_t url[64] = {};
             _snwprintf(url, 64, L"steam://store/%d", state->hoveredGame->steamId);
 
-            if ((UINT_PTR)ShellExecuteW(Gui::ImplWin32GetHwnd(), L"open", url, nullptr, nullptr, SW_SHOW) <= 32) {
+            if (!RunLaunchCommand(url)) {
                 _snwprintf(url, 64, L"https://store.steampowered.com/app/%d", state->hoveredGame->steamId);
                 ShellExecuteW(Gui::ImplWin32GetHwnd(), L"open", url, nullptr, nullptr, SW_SHOW);
             }

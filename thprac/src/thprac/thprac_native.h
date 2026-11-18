@@ -6,10 +6,37 @@
 #include "thprac_native_bundle.h"
 #include "thprac_gui_locale.h"
 namespace THPrac {
-// Run a host-side shell command from a Wine/Proton process (ntdll exports
-// wine_get_version there, and Z: is mapped to the container root). The
-// command is handed to /bin/sh -c, so pipes, redirections and env vars work.
-inline bool RunLaunchCommand(const wchar_t* command) {
+// True when this process runs inside a Proton/pressure-vessel container (a
+// Steam shortcut launch). Such containers cannot reach the host Steam client
+// directly: the in-container `steam` bootstrap is a private Steam client that
+// fails with "Failed to connect to Steam".
+inline bool IsProtonContainer() {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = 0;
+        for (const wchar_t* name : { L"STEAM_COMPAT_DATA_PATH", L"STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                                     L"STEAM_COMPAT_TOOL_PATHS", L"PRESSURE_VESSEL_FILENAMES" }) {
+            wchar_t probe[4] = {};
+            if (GetEnvironmentVariableW(name, probe, 4) > 0) {
+                cached = 1;
+                break;
+            }
+        }
+    }
+    return cached == 1;
+}
+
+// Extract a steam:// URL from a command line (up to the next whitespace).
+inline std::wstring ExtractSteamUrl(const std::wstring& cmd) {
+    size_t at = cmd.find(L"steam://");
+    if (at == std::wstring::npos) return std::wstring();
+    size_t end = at;
+    while (end < cmd.size() && cmd[end] != L' ' && cmd[end] != L'\t') ++end;
+    return cmd.substr(at, end - at);
+}
+
+// Run a command through /bin/sh via the Z: drive mapping.
+inline bool RunShellCommand(const wchar_t* command) {
     std::wstring escaped;
     for (auto c = command; *c; ++c) {
         if (*c == L'"') {
@@ -19,16 +46,49 @@ inline bool RunLaunchCommand(const wchar_t* command) {
         }
     }
     std::wstring params = L"-c \"" + escaped + L"\"";
-    AttachLog("RunLaunchCommand len=%d", (int)escaped.size());
     // ShellExecuteW resolves the Unix binary through the Z: drive mapping.
     HINSTANCE result = ShellExecuteW(nullptr, L"open", L"Z:\\bin\\sh", params.c_str(), nullptr, SW_HIDE);
-    AttachLog("RunLaunchCommand result=%d", (int)(INT_PTR)result);
     return (INT_PTR)result > 32;
+}
+
+// Run a host-side shell command from a Wine/Proton process (ntdll exports
+// wine_get_version there, and Z: is mapped to the container root). The
+// command is handed to /bin/sh -c, so pipes, redirections and env vars work.
+// steam:// URLs are special-cased: inside a Proton container they must be
+// dispatched to the host Steam client (Steam itself does this through
+// `steam-runtime-launch-client --alongside-steam -- xdg-open ...`).
+inline bool RunLaunchCommand(const wchar_t* command) {
+    std::wstring cmd = command;
+    std::wstring url = ExtractSteamUrl(cmd);
+    AttachLog("RunLaunchCommand len=%d container=%d url=%d", (int)cmd.size(), IsProtonContainer() ? 1 : 0,
+        url.empty() ? 0 : 1);
+    if (!url.empty()) {
+        if (IsProtonContainer()) {
+            std::wstring quoted = L"'" + url + L"'";
+            const wchar_t* attempts[] = {
+                L"steam-runtime-launch-client --alongside-steam -- xdg-open ",
+                L"xdg-open ",
+            };
+            for (const wchar_t* prefix : attempts) {
+                std::wstring attempt = std::wstring(prefix) + quoted;
+                AttachLog("RunLaunchCommand container attempt: %ls", attempt.c_str());
+                if (RunShellCommand(attempt.c_str())) {
+                    AttachLog("RunLaunchCommand container attempt accepted");
+                    return true;
+                }
+            }
+            AttachLog("RunLaunchCommand container attempts rejected, falling back");
+        } else if (cmd.find(L"steam://") == 0) {
+            // Bare URL on a host-visible Z: drive: let the steam client handle it.
+            cmd = L"steam " + url;
+        }
+    }
+    return RunShellCommand(cmd.c_str());
 }
 // Cross-bitness is handled by a companion built from this same source tree.
 inline bool LaunchTH06NC(bool practice, DWORD attachPid = 0, bool lowLatency = false) {
     if (!practice && !attachPid && !lowLatency)
-        return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"steam://rungameid/4659620", nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+        return RunLaunchCommand(L"steam://rungameid/4659620");
     AttachLog("LaunchTH06NC practice=%d pid=%lu lowLatency=%d", practice ? 1 : 0, (unsigned long)attachPid, lowLatency ? 1 : 0);
     std::wstring helper;
     if (NativeBundle::Present()) {

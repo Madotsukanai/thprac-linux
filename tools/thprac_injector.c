@@ -23,9 +23,9 @@
  *   6  LoadLibraryW failed in the target (bad path or module error)
  *   7  other injector failure
  *
- * Diagnostics go to stderr.
+ * Diagnostics go to stderr. With --result <path> a final status line
+ * ("ok" / "err ...") is written to that file (DOS Z:\ or Unix path).
  */
-#define _GNU_SOURCE
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -533,142 +533,133 @@ static int target_arch(pid_t pid, int* unsupported32, int* wow64) {
 /* ------------------------------------------------------------------ */
 
 static void usage(void) {
-    say("usage: thprac-injector --pid <pid> --dll <DOS path> [--wait <sec>]\n"
+    say("usage: thprac-injector --pid <pid> --dll <DOS path> [--wait <sec>] [--sig] [--result <path>]\n"
+        "       thprac-injector --find <exe[,exe2...]> --dll <DOS path> [--wait <sec>] [--sig] [--result <path>]\n"
         "       thprac-injector --spawn '<command>' --dll <DOS path>   (test mode)");
 }
 
-/* ------------------------------------------------------------------ */
-/* Fork-follow tracer (spawn mode)                                     */
-/*                                                                     */
-/* Wine's launcher daemonizes the game process (start.exe /exec forks   */
-/* and exits), so the game is not a descendant of this process and yama */
-/* ptrace_scope=1 denies ptrace. Instead we trace the whole launch      */
-/* chain: our own child is followed through fork/clone events (auto     */
-/* traced descendants inherit our tracer authority), and when the game  */
-/* execs we keep it traced.                                             */
-/* ------------------------------------------------------------------ */
-#define THPRAC_MAX_TRACEES 64
-static pid_t g_tracees[THPRAC_MAX_TRACEES];
-static int g_ntracees = 0;
+/* Find a Wine process whose command line contains one of the given exe
+ * basenames. Returns the pid or 0. Reading /proc requires no special rights,
+ * so this works before any ptrace attachment. */
+static pid_t find_game_pid(const char* names) {
+    DIR* d = opendir("/proc");
+    if (!d) return 0;
+    pid_t best = 0;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        pid_t c = atoi(e->d_name);
+        if (c <= 0) continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", c);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        char buf[1024] = {};
+        ssize_t got = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (got <= 0) continue;
+        for (char* z = buf; z < buf + got; ++z)
+            if (*z == 0) *z = ' ';
+        int matched = 0;
+        const char* p = names;
+        for (;;) {
+            const char* comma = strchr(p, ',');
+            size_t len = comma ? (size_t)(comma - p) : strlen(p);
+            if (len && memmem(buf, (size_t)got, p, len)) {
+                matched = 1;
+                break;
+            }
+            if (!comma) break;
+            p = comma + 1;
+        }
+        if (!matched) continue;
+        int unsupported32 = 0, wow64 = 0;
+        if (!target_arch(c, &unsupported32, &wow64)) continue;
+        best = c;
+        break;
+    }
+    closedir(d);
+    return best;
+}
+
+/* Read the target's main image base from its maps (lowest file-backed
+ * mapping whose path looks like the game exe). Requires no ptrace. */
+static uint64_t target_image_base(pid_t pid) {
+    static struct region regs[4096];
+    int n = read_maps(pid, regs, 4096);
+    uint64_t best = 0;
+    for (int i = 0; i < n; i++) {
+        if (!regs[i].path[0] || !strstr(regs[i].path, ".exe")) continue;
+        if (strstr(regs[i].path, "/x86_64-windows/") || strstr(regs[i].path, "/i386-windows/")) continue;
+        if (!best || regs[i].start < best) best = regs[i].start;
+    }
+    return best;
+}
+
+/* 'PRAC' signature written by thprac when a game is already applied. */
+static int target_already_applied(pid_t pid) {
+    uint64_t base = target_image_base(pid);
+    if (!base) return 0;
+    uint32_t e_lfanew = 0;
+    if (read_mem(pid, base + 0x3c, &e_lfanew, 4) != 4 || e_lfanew < 4) return 0;
+    uint32_t sig = 0;
+    if (read_mem(pid, base + e_lfanew - 4, &sig, 4) != 4) return 0;
+    return sig == 0x43524150UL;
+}
+
+/* DOS (Z:\...) -> Unix path. Also accepts plain Unix paths. */
+static void dos_to_unix(const char* dos, char* out, size_t outsz) {
+    if (!dos || !dos[0]) { if (outsz) out[0] = 0; return; }
+    if (dos[0] == '/') { snprintf(out, outsz, "%s", dos); return; }
+    if (((dos[0] >= 'A' && dos[0] <= 'Z') || (dos[0] >= 'a' && dos[0] <= 'z')) && dos[1] == ':') {
+        char drive = (char)(dos[0] | 0x20);
+        const char* rest = dos + 2;
+        while (*rest == '\\' || *rest == '/') ++rest;
+        if (drive == 'z') {
+            snprintf(out, outsz, "/%s", rest);
+        } else {
+            snprintf(out, outsz, "/mnt/%c/%s", drive, rest);
+        }
+        for (char* p = out; *p; ++p)
+            if (*p == '\\') *p = '/';
+        return;
+    }
+    snprintf(out, outsz, "%s", dos);
+}
+
+static const char* g_result_path = NULL;
+
+static void write_result_file(int code) {
+    if (!g_result_path || !g_result_path[0]) return;
+    char unixpath[4096];
+    dos_to_unix(g_result_path, unixpath, sizeof(unixpath));
+    if (!unixpath[0]) return;
+    const char* text;
+    switch (code) {
+    case 0: text = "ok"; break;
+    case 3: text = "err ptrace-denied (one-time fix: sudo setcap cap_sys_ptrace=ep <injector>)"; break;
+    case 4: text = "err 32-bit-wine-unsupported"; break;
+    case 5: text = "err loader-not-ready"; break;
+    case 6: text = "err module-load-failed"; break;
+    case 2: text = "err target-not-a-supported-wine-process"; break;
+    default: text = "err injector-failure"; break;
+    }
+    FILE* f = fopen(unixpath, "w");
+    if (!f) {
+        say("cannot write result file %s: %s", unixpath, strerror(errno));
+        return;
+    }
+    fprintf(f, "%s\n", text);
+    fclose(f);
+    say("result written to %s", unixpath);
+}
+
+static int run(int argc, char** argv);
 
 static uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-static int known_tracee(pid_t t) {
-    for (int i = 0; i < g_ntracees; i++)
-        if (g_tracees[i] == t) return 1;
-    return 0;
-}
-
-static void add_tracee(pid_t t) {
-    if (known_tracee(t)) return;
-    if (g_ntracees < THPRAC_MAX_TRACEES) g_tracees[g_ntracees++] = t;
-}
-
-static void remove_tracee(pid_t t) {
-    for (int i = 0; i < g_ntracees; i++)
-        if (g_tracees[i] == t) {
-            g_tracees[i] = g_tracees[--g_ntracees];
-            return;
-        }
-}
-
-static void set_follow_opts(pid_t t) {
-    ptrace(PTRACE_SETOPTIONS, t, 0,
-        (void*)(uintptr_t)(PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC));
-}
-
-/* Reap all pending stops: newly traced descendants are adopted, options are
- * set and everyone is resumed. Used while waiting for the game to initialize. */
-/* Reap all pending stops: newly traced descendants are adopted, options are
- * set and everyone is resumed. Unrelated signals are passed through (Wine's
- * wineserver IPC relies on SIGUSR1 etc.); only ptrace artifacts are swallowed. */
-static void resume_tracee(pid_t got, int status) {
-    int event = status >> 16;
-    int sig = WSTOPSIG(status);
-    if (event != 0 || sig == SIGTRAP || sig == SIGSTOP)
-        ptrace(PTRACE_CONT, got, 0, 0);
-    else
-        ptrace(PTRACE_CONT, got, 0, (void*)(uintptr_t)sig);
-}
-
-static void drain_events(int ms) {
-    uint64_t until = now_ms() + (uint64_t)ms;
-    for (;;) {
-        int status = 0;
-        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
-        if (got == 0) {
-            if (now_ms() >= until) return;
-            usleep(20000);
-            continue;
-        }
-        if (got < 0) return;
-        if (WIFSTOPPED(status)) {
-            add_tracee(got);
-            set_follow_opts(got);
-            if (getenv("THPRAC_INJ_DEBUG"))
-                say("drain: adopted %d (sig=%d event=%x)", got, WSTOPSIG(status), status >> 16);
-            resume_tracee(got, status);
-        } else {
-            remove_tracee(got);
-        }
-    }
-}
-
-/* Detach every remaining tracee so the target (and its siblings) resume. */
-static void detach_all(void) {
-    for (int i = 0; i < g_ntracees; i++)
-        ptrace(PTRACE_DETACH, g_tracees[i], 0, 0);
-    g_ntracees = 0;
-}
-
-/* Stop every thread of the traced game process (SIGSTOP on a traced process
- * comes to us as a group-stop) and return the list of stopped tids. */
-static int stop_process(pid_t pid, pid_t* tids, int max) {
-    kill(pid, SIGSTOP);
-    int n = 0;
-    uint64_t until = now_ms() + 2000;
-    for (;;) {
-        int status = 0;
-        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
-        if (got == 0) {
-            if (n > 0 || now_ms() >= until) break;
-            usleep(10000);
-            continue;
-        }
-        if (got < 0) break;
-        if (WIFSTOPPED(status)) {
-            int dup = 0;
-            for (int i = 0; i < n; i++) if (tids[i] == got) dup = 1;
-            if (!dup && n < max) tids[n++] = got;
-        } else {
-            remove_tracee(got);
-        }
-        if (now_ms() >= until) break;
-    }
-    /* Reap a bit more so late threads are included. */
-    uint64_t until2 = now_ms() + 300;
-    for (;;) {
-        int status = 0;
-        pid_t got = waitpid(-1, &status, __WALL | WNOHANG);
-        if (got == 0) {
-            if (now_ms() >= until2) break;
-            usleep(10000);
-            continue;
-        }
-        if (got < 0) break;
-        if (WIFSTOPPED(status)) {
-            int dup = 0;
-            for (int i = 0; i < n; i++) if (tids[i] == got) dup = 1;
-            if (!dup && n < max) tids[n++] = got;
-        } else {
-            remove_tracee(got);
-        }
-    }
-    return n;
 }
 
 static int pid_matches_target(pid_t pid, const char* exe_token, int* unsupported32, int* wow64) {
@@ -728,7 +719,7 @@ static int pid_matches_target(pid_t pid, const char* exe_token, int* unsupported
     return r;
 }
 
-static pid_t spawn_target(const char* cmdline) {
+static pid_t spawn_target(const char* cmdline, int wait_secs) {
     /* "exec" makes the shell replace itself with the command, so the pid we
      * track is the one that eventually execs wine's preloader. */
     char* cmd = malloc(strlen(cmdline) + 8);
@@ -757,91 +748,45 @@ static pid_t spawn_target(const char* cmdline) {
         return -1;
     }
     say("spawn: exec-stop ok");
-    /* Fork-follow: keep tracing so auto-traced descendants (start.exe, the
-     * game process) inherit our tracer authority even after reparenting. */
-    add_tracee(pid);
-    set_follow_opts(pid);
-    ptrace(PTRACE_CONT, pid, 0, 0);
+    /* Let it run. Wine's launcher daemonizes the game (start.exe /exec forks
+     * and exits), so keep the launcher untraced and scan /proc for whichever
+     * process ends up running the requested image. */
+    ptrace(PTRACE_DETACH, pid, 0, 0);
 
     /* The game execs in a descendant process; find it via its command line
      * and mapped image. */
     const char* exe_token = strrchr(cmdline, ' ');
     exe_token = exe_token ? exe_token + 1 : cmdline;
-    uint64_t deadline = now_ms() + 30000;
+    uint64_t deadline = now_ms() + (uint64_t)wait_secs * 4 * 1000;
     for (;;) {
-        int status2 = 0;
-        pid_t got = waitpid(-1, &status2, __WALL | WNOHANG);
-        if (got == 0) {
-            if (now_ms() > deadline) {
-                say("spawn: timeout waiting for the game process");
-                detach_all();
-                return -2;
-            }
-            /* No event pending: poll known tracees for one whose image is
-             * mapped and matching (the game image is mapped by the preloader
-             * after the exec-stop, so the exec event itself is too early). */
-            for (int i = 0; i < g_ntracees; i++) {
-                int unsupported32 = 0, wow64 = 0;
-                int dbg = getenv("THPRAC_INJ_DEBUG") && (now_ms() / 1000) % 3 == 0;
-                if (dbg) {
-                    char cpath[64];
-                    snprintf(cpath, sizeof(cpath), "/proc/%d/cmdline", g_tracees[i]);
-                    int cfd = open(cpath, O_RDONLY);
-                    char cbuf[128] = {};
-                    if (cfd >= 0) { ssize_t cg = read(cfd, cbuf, 127); if (cg > 0) for (ssize_t z = 0; z < cg; z++) if (cbuf[z] == 0) cbuf[z] = ' '; close(cfd); }
-                    say("spawn: poll %d cmd=%s", g_tracees[i], cbuf);
-                }
-                if (pid_matches_target(g_tracees[i], exe_token, &unsupported32, &wow64)) {
-                    pid_t game = g_tracees[i];
-                    say("spawn: game process %d found%s", game, wow64 ? " (wow64)" : "");
-                    kill(game, SIGSTOP);
-                    int st3 = 0;
-                    while (waitpid(game, &st3, __WALL) != game) {}
-                    for (int j = 0; j < g_ntracees; j++)
-                        if (g_tracees[j] != game) ptrace(PTRACE_DETACH, g_tracees[j], 0, 0);
-                    g_tracees[0] = game;
-                    g_ntracees = 1;
-                    return game;
+        int unsupported32 = 0, wow64 = 0;
+        if (pid_matches_target(pid, exe_token, &unsupported32, &wow64)) {
+            say("spawn: game process %d found%s", pid, wow64 ? " (wow64)" : "");
+            return pid;
+        }
+        char dir[16];
+        snprintf(dir, sizeof(dir), "/proc");
+        DIR* d = opendir(dir);
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d))) {
+                if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+                pid_t c = atoi(e->d_name);
+                if (c == pid) continue;
+                unsupported32 = wow64 = 0;
+                if (pid_matches_target(c, exe_token, &unsupported32, &wow64)) {
+                    closedir(d);
+                    say("spawn: game process %d found%s", c, wow64 ? " (wow64)" : "");
+                    return c;
                 }
             }
-            usleep(20000);
-            continue;
+            closedir(d);
         }
-        if (got < 0) {
-            say_errno("spawn: waitpid(-1)");
-            return -1;
+        if (now_ms() > deadline) {
+            say("spawn: timeout waiting for the game process");
+            return -2;
         }
-        if (WIFEXITED(status2) || WIFSIGNALED(status2)) {
-            remove_tracee(got);
-            continue;
-        }
-        if (!WIFSTOPPED(status2)) continue;
-        if (!known_tracee(got)) {
-            add_tracee(got);
-            set_follow_opts(got);
-        }
-        int event = status2 >> 16;
-        if (event == PTRACE_EVENT_FORK || event == PTRACE_EVENT_CLONE) {
-            if (getenv("THPRAC_INJ_DEBUG")) say("spawn: %d forked/cloned", got);
-            ptrace(PTRACE_CONT, got, 0, 0);
-            continue;
-        }
-        /* Any other stop (exec event, group-stop, signal): is this the game? */
-        {
-            int unsupported32 = 0, wow64 = 0;
-            if (pid_matches_target(got, exe_token, &unsupported32, &wow64)) {
-                say("spawn: game process %d found%s", got, wow64 ? " (wow64)" : "");
-                /* Detach the rest of the chain; keep only the game traced. */
-                for (int i = 0; i < g_ntracees; i++)
-                    if (g_tracees[i] != got) ptrace(PTRACE_DETACH, g_tracees[i], 0, 0);
-                g_tracees[0] = got;
-                g_ntracees = 1;
-                return got;
-            }
-            if (getenv("THPRAC_INJ_DEBUG"))
-                say("spawn: event %x sig %d from %d (not the game)", event, WSTOPSIG(status2), got);
-        }
-        resume_tracee(got, status2);
+        usleep(100000);
     }
 }
 
@@ -902,33 +847,58 @@ static pid_t seize_worker(pid_t pid, struct user_regs_struct* saved, const struc
 }
 
 int main(int argc, char** argv) {
+    int code = run(argc, argv);
+    write_result_file(code);
+    return code;
+}
+
+static int run(int argc, char** argv) {
     pid_t pid = 0;
     const char* dll = NULL;
     const char* spawn = NULL;
+    const char* find = NULL;
     int wait_secs = 5;
     int spawned = 0;
     int dry = 0;
+    int sig = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pid") && i + 1 < argc) pid = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dll") && i + 1 < argc) dll = argv[++i];
         else if (!strcmp(argv[i], "--spawn") && i + 1 < argc) spawn = argv[++i];
+        else if (!strcmp(argv[i], "--find") && i + 1 < argc) find = argv[++i];
         else if (!strcmp(argv[i], "--wait") && i + 1 < argc) wait_secs = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--result") && i + 1 < argc) g_result_path = argv[++i];
+        else if (!strcmp(argv[i], "--sig")) sig = 1;
         else if (!strcmp(argv[i], "--dry")) dry = 1;
         else { usage(); return 1; }
     }
-    if (!dll || (!pid && !spawn)) {
+    if (!dll || (!pid && !spawn && !find)) {
         usage();
         return 1;
     }
     if (spawn) {
-        pid = spawn_target(spawn);
+        pid = spawn_target(spawn, wait_secs);
         if (pid <= 0) {
             say_errno("spawn");
             return 7;
         }
         spawned = 1;
         say("spawned target pid %d", pid);
+    }
+    if (find && !pid) {
+        /* Poll for the game process (it may still be starting). */
+        uint64_t deadline = now_ms() + (uint64_t)wait_secs * 4 * 1000;
+        for (;;) {
+            pid = find_game_pid(find);
+            if (pid > 0) break;
+            if (now_ms() > deadline) {
+                say("no wine process matching '%s' found", find);
+                return 2;
+            }
+            usleep(200000);
+        }
+        say("found target pid %d for '%s'", pid, find);
     }
 
     int unsupported32 = 0, wow64 = 0;
@@ -939,67 +909,14 @@ int main(int argc, char** argv) {
     }
     say("target is %s", wow64 ? "wow64 (32-bit game, 64-bit host side)" : "64-bit");
 
+    if (target_already_applied(pid)) {
+        say("thprac signature already present; nothing to do");
+        return 0;
+    }
+
     struct user_regs_struct saved;
     memset(&saved, 0, sizeof(saved));
     pid_t tid = 0;
-    if (spawned) {
-        /* The game process is already traced by our fork-follow tracer (it is
-         * stopped at its exec-stop). Resume it and wait for the 64-bit PE side
-         * to come up, then stop the whole process and pick a hijack thread. */
-        set_follow_opts(pid);
-        ptrace(PTRACE_CONT, pid, 0, 0);
-        static struct region scan0[4096];
-        const char* token = strrchr(spawn, ' ');
-        token = token ? token + 1 : spawn;
-        const char* tbase = strrchr(token, '/');
-        tbase = tbase ? tbase + 1 : token;
-        int ready = 0;
-        for (int i = 0; i < 600 && !ready; i++) {
-            int n_scan0 = read_maps(pid, scan0, 4096);
-            for (int j = 0; j < n_scan0; j++) {
-                if (scan0[j].path[0] && strstr(scan0[j].path, "/x86_64-windows/ntdll.dll") &&
-                    strstr(scan0[j].path, tbase)) {
-                    ready = 1;
-                    break;
-                }
-            }
-            if (!ready) {
-                drain_events(80);
-            }
-        }
-        if (!ready) {
-            say("spawn: loader never became ready");
-            detach_all();
-            return 2;
-        }
-        for (int round = 0; round < 60 && !tid; round++) {
-            pid_t tids[128];
-            int n = stop_process(pid, tids, 128);
-            static struct region scan[4096];
-            int n_scan = read_maps(pid, scan, 4096);
-            struct range pes[512];
-            int n_pes = collect_pe_ranges(scan, n_scan, pes, 512);
-            for (int i = 0; i < n; i++) {
-                struct user_regs_struct r;
-                if (get_regs(tids[i], &r) < 0) continue;
-                if ((r.cs & 0xffff) != 0x33 || !rip_in_pe(r.rip, pes, n_pes)) continue;
-                tid = tids[i];
-                saved = r;
-                break;
-            }
-            if (!tid) {
-                /* Resume everyone briefly and try again. */
-                for (int i = 0; i < n; i++) ptrace(PTRACE_CONT, tids[i], 0, 0);
-                drain_events(150);
-            }
-        }
-        if (!tid) {
-            say("no injectable thread found in pid %d", pid);
-            detach_all();
-            return 2;
-        }
-        say("stopped tid %d (fork-follow)", tid);
-    } else
     for (int round = 0; round < 60 && !tid; round++) {
         static struct region scan[4096];
         int n_scan = read_maps(pid, scan, 4096);
@@ -1137,6 +1054,27 @@ int main(int argc, char** argv) {
         read_mem(pid, work + 0x828, &handle, 8);
         say("module loaded at %llx", (unsigned long long)handle);
 
+        /* Optionally mark the target's main exe as thprac-applied (same
+         * 'PRAC' signature WriteTHPracSig pokes from the Windows helper).
+         * The thread is still stopped at the return trampoline, so a plain
+         * PTRACE_POKEDATA works even on the read-only PE header. */
+        if (sig) {
+            uint64_t peb = 0, image_base = 0, e_lfanew = 0;
+            if (read_mem(pid, saved.gs_base + 0x60, &peb, 8) == 8 && peb &&
+                read_mem(pid, peb + 0x10, &image_base, 8) == 8 && image_base &&
+                read_mem(pid, image_base + 0x3c, &e_lfanew, 4) == 4 && e_lfanew > 4) {
+                uint64_t sig_addr = image_base + e_lfanew - 4;
+                if (ptrace(PTRACE_POKEDATA, tid, (void*)(uintptr_t)sig_addr,
+                           (void*)(uintptr_t)0x43524150UL) == 0) {
+                    say("thprac sig written at %llx", (unsigned long long)sig_addr);
+                } else {
+                    say_errno("sig write (non-fatal)");
+                }
+            } else {
+                say("cannot locate the target image base for --sig (non-fatal)");
+            }
+        }
+
         /* Verify the module is visible in maps (basename match). */
         {
             const char* base = strrchr(dll, '\\');
@@ -1156,7 +1094,6 @@ int main(int argc, char** argv) {
     set_regs(tid, &saved);
     ptrace(PTRACE_DETACH, tid, 0, 0);
     say("detached tid %d", tid);
-    if (spawned) detach_all();
 
     if (result_code != 0) {
         say("injection failed (code %d)", result_code);

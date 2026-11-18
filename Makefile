@@ -18,7 +18,6 @@ LOC_JSON_SRC := thprac/loc_json.cpp thprac/src/3rdParties/yyjson/yyjson.c
 LOC_JSON_EXE := $(BUILD_DIR)/loc_json.exe
 STAMP_NC     := $(BUILD_DIR)/.built
 BIN_DLL    := $(BUILD_DIR)/bin/libthprac_th06nc.dll
-BIN_FT     := $(BUILD_DIR)/bin/freetype.dll
 BIN_BRIDGE := $(BUILD_DIR)/bin/thprac_bridge64.exe
 
 INTEGRATED_EXE := $(DIST_DIR)/thprac-linux.exe
@@ -62,11 +61,12 @@ $(TOOLCHAIN): | $(BUILD_DIR)
 	'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' > $@
 
 .PHONY: nc
-nc: $(TOOLCHAIN) $(BUILD_DIR)/.locale CMakeLists.txt
-	cmake -S . -B $(BUILD_DIR) -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) -DCMAKE_BUILD_TYPE=Release
+nc: $(TOOLCHAIN) $(BUILD_DIR)/.locale $(FT64_LIB) CMakeLists.txt
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) -DCMAKE_BUILD_TYPE=Release \
+		-DTHPRAC_FT_STATIC=$(FT64_LIB) -DTHPRAC_FT_STATIC_INCLUDE=$(FT64_PREFIX)/include/freetype2
 	cmake --build $(BUILD_DIR) --target thprac_th06nc thprac_bridge64 -j$(NPROC)
 
-$(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE): nc
+$(BIN_DLL) $(BIN_BRIDGE): nc
 	@:
 
 $(DIST_DIR):
@@ -114,12 +114,30 @@ $(FT32_LIB): $(TOOLCHAIN32) | $(LAUNCHER_BUILD)
 	cmake --build $(FT32_DIR)/build -j$(NPROC)
 	cmake --install $(FT32_DIR)/build
 
+
+# --- 64-bit FreeType (static) for the th06nc game module ---
+FT64_DIR    := $(BUILD_DIR)/freetype
+FT64_PREFIX := $(abspath $(FT64_DIR)/install)
+FT64_LIB    := $(FT64_PREFIX)/lib/libfreetype.a
+
+$(FT64_DIR)/freetype-$(FT_VERSION).tar.xz: | $(BUILD_DIR)
+	mkdir -p $(FT64_DIR)
+	test -f $@ || curl -fL -o $@ $(FT_URL)
+
+$(FT64_LIB): $(FT64_DIR)/freetype-$(FT_VERSION).tar.xz $(TOOLCHAIN)
+	tar -xf $(FT64_DIR)/freetype-$(FT_VERSION).tar.xz -C $(FT64_DIR)
+	cmake -S $(FT64_DIR)/freetype-$(FT_VERSION) -B $(FT64_DIR)/build \
+		-DCMAKE_TOOLCHAIN_FILE=$(abspath $(TOOLCHAIN)) -DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX=$(FT64_PREFIX) \
+		-DFT_DISABLE_BROTLI=ON -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_PNG=ON -DFT_DISABLE_ZLIB=ON
+	cmake --build $(FT64_DIR)/build -j$(NPROC)
+	cmake --install $(FT64_DIR)/build
+
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_FT) $(BIN_BRIDGE) $(INJECTOR_EXE) $(WINLOADER_DLL) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_BRIDGE) $(INJECTOR_EXE) $(WINLOADER_DLL) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
-	cp $(BIN_FT) $(LAUNCHER_BUILD)/payload/freetype.dll
 	cp $(BIN_BRIDGE) $(LAUNCHER_BUILD)/payload/thprac_bridge64.exe
 	cp LICENCE THIRD_PARTY_NOTICES.txt $(LAUNCHER_BUILD)/payload/
 	cp thprac/src/3rdParties/FreeType/LICENSE.TXT $(LAUNCHER_BUILD)/payload/licenses/FreeType-LICENSE.txt

@@ -13,7 +13,7 @@ namespace THPrac::NativeBundle {
 // Resource IDs and relative names also appear in tools/package_nc_single.py.
 inline constexpr int BundleId = 100;
 inline constexpr const wchar_t* Files[] = {
-    L"thprac_bridge64.exe", L"thprac_th06nc.dll", L"freetype.dll",
+    L"thprac_bridge64.exe", L"thprac_th06nc.dll",
     L"LICENCE",
     L"licenses\\FreeType-LICENSE.txt", L"licenses\\FreeType-FTL.txt",
     L"licenses\\MinHook.txt", L"licenses\\ImGui.txt", L"THIRD_PARTY_NOTICES.txt",

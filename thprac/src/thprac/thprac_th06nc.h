@@ -74,6 +74,39 @@ struct LaunchOptions { uint32_t magic=Magic, version=Protocol; int practice=1, l
 inline std::wstring mapName(DWORD pid) { return L"Global\\Th06NcPractice_"+std::to_wstring(pid); }
 inline std::wstring mutexName(DWORD pid) { return mapName(pid)+L"_lock"; }
 inline std::wstring launchName(DWORD pid) { return mapName(pid)+L"_launch"; }
+
+// Options file handed over through the filesystem ($HOME is shared between
+// containers), used when the in-game module is loaded by the native injector
+// and no wineserver named object could be prepared beforehand.
+inline std::wstring launchOptionsPath() {
+    wchar_t home[1024] = {};
+    std::wstring p = L"Z:\\home";
+    if (GetEnvironmentVariableW(L"HOME", home, 1024) && home[0] == L'/') {
+        p = std::wstring(L"Z:") + home;
+    }
+    for (auto& c : p) if (c == L'/') c = L'\\';
+    return p + L"\\.cache\\thprac-wine\\th06nc_launch.opt";
+}
+inline bool WriteLaunchOptionsFile(const LaunchOptions& o) {
+    HANDLE f = CreateFileW(launchOptionsPath().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(f, &o, sizeof(o), &wrote, nullptr) && wrote == sizeof(o);
+    CloseHandle(f);
+    return ok;
+}
+// Reads and deletes the file so stale options never leak into later runs.
+inline bool ReadLaunchOptionsFile(LaunchOptions& o) {
+    HANDLE f = CreateFileW(launchOptionsPath().c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LaunchOptions tmp{};
+    DWORD got = 0;
+    bool ok = ReadFile(f, &tmp, sizeof(tmp), &got, nullptr) && got == sizeof(tmp) && tmp.magic == Magic && tmp.version == Protocol;
+    CloseHandle(f);
+    DeleteFileW(launchOptionsPath().c_str());
+    if (ok) o = tmp;
+    return ok;
+}
 inline std::wstring executablePath(HMODULE module=nullptr) {
     std::wstring s(32768,L'\0'); auto n=GetModuleFileNameW(module,s.data(),DWORD(s.size())); s.resize(n); return s;
 }
