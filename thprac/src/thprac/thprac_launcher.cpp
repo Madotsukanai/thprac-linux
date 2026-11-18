@@ -411,8 +411,10 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
     }
     ImGui::EndTabBar();
 
-    if (state->reflectiveLaunchID && FindAndAttach(false, false, state->reflectiveLaunchID)) {
+    if (state->reflectiveLaunchID && FindAndAttach(false, false, state->reflectiveLaunchID,
+            state->reflectiveAppId.empty() ? nullptr : state->reflectiveAppId.c_str())) {
         state->reflectiveLaunchID = ID_UNKNOWN;
+        state->reflectiveAppId.clear();
     }
     if (state->reflectiveLaunchID == ID_UNKNOWN && state->closeAfterLaunch) {
         PostQuitMessage(0);
@@ -508,6 +510,7 @@ void SaveLauncherSettings(LauncherSettings* launcherSettings) {
 int Launcher(HINSTANCE hInstance, int nCmdShow) {
     // There shall only be one
     if (HWND existing = FindWindowW(g_WndCls.lpszClassName, nullptr)) {
+        if (!IsWindowVisible(existing)) ShowWindow(existing, SW_RESTORE);
         SetForegroundWindow(existing);
         return 0;
     }

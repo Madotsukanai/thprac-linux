@@ -6,13 +6,10 @@
 #include "thprac_gui_locale.h"
 #include "thprac_utils.h"
 #include "thprac_native.h"
-#include "thprac_native_bundle.h"
-#include "thprac_attach_log.h"
-#include "thprac_th06nc.h"
-#include "thprac_load_exe.h"
 
 #include <windows.h>
 
+#include <atomic>
 #include <map>
 #include <set>
 #include <string>
@@ -168,7 +165,7 @@ void DebugLog(const std::string& text, bool force = false) {
 // ---------------------------------------------------------------------------
 // The Unix side. Runs natively through "/bin/sh" (Wine starts non-PE
 // executables natively), so it only relies on POSIX sh plus tr/sed/readlink.
-// MODE, OUT, INJ, TARGET, NAME, SIG, MODS and MODN are prepended by the launcher.
+// MODE, OUT, SELF, TARGET and NEEDNS are prepended by the launcher.
 // ---------------------------------------------------------------------------
 const char kScriptBody[] = R"SH(
 LC_ALL=C; export LC_ALL
@@ -207,16 +204,42 @@ find_launch_client() {
   return 1
 }
 lclient=$(find_launch_client 2>/dev/null || true)
-command -v timeout >/dev/null 2>&1 && to="timeout 10"
 
 own=${WINEPREFIX:-$HOME/.wine}
+own=$(readlink -f "$own" 2>/dev/null || printf %s "$own")
 ownmnt=$(readlink /proc/self/ns/mnt 2>/dev/null)
+
+to=
+command -v timeout >/dev/null 2>&1 && to="timeout 10"
+
+# Ways of entering a pressure-vessel container with nsenter. The container is
+# an unprivileged user namespace, so plain "nsenter -m" fails (EPERM); the user
+# namespace must be joined first (-U), and its setgroups is denied, hence
+# --preserve-credentials (otherwise: "setgroups failed").
+nsopts() {
+  case $1 in
+    1) echo "-U --preserve-credentials -m -r -w" ;;
+    2) echo "--preserve-credentials -m -r -w" ;;
+    3) echo "-U -m -r -w" ;;
+  esac
+}
+pick_nsenter() {
+  command -v nsenter >/dev/null 2>&1 || return 1
+  for n in 1 2 3; do
+    v=$(nsopts $n)
+    $to nsenter -t "$1" $v true >> "$OUT.log" 2>&1
+    r=$?
+    if [ "$r" = 0 ]; then printf '%s\n' "$v"; return 0; fi
+    dbg "   nsenter [$v] rc=$r"
+  done
+  return 1
+}
 
 scan_procs() {
   root=${1:-/proc}
   dbg "== scan root=$root: own=$own ownmnt=$ownmnt uid=$(id -u 2>/dev/null) pid1=$(cat $root/1/comm 2>/dev/null)"
   dbg "   $(grep -E '^NSpid' $root/self/status 2>/dev/null)"
-  dbg "   tools: launch-client=${lclient:-$(command -v steam-runtime-launch-client 2>/dev/null)}"
+  dbg "   tools: nsenter=$(command -v nsenter) launch-client=${lclient:-$(command -v steam-runtime-launch-client 2>/dev/null)}"
   total=0; unreadable=0; winelike=0; found=0; tested=0
   for d in "$root"/[0-9]*; do
     pid=${d##*/}
@@ -272,11 +295,20 @@ scan_procs() {
     found=$((found+1))
     if [ "$ns" = 1 ] && [ "$tested" = 0 ]; then
       tested=1
-      # Which way into the other container works from here? Only diagnostics;
-      # injection is done with the native ptrace injector either way.
+      # Which way into the other container works from here?
       if [ -n "$lclient" ] && [ -n "$appid" ]; then
         $to "$lclient" --inside-app="$appid" -- true >> "$OUT.log" 2>&1
-        dbg "   probe launch-client(inside-app) rc=$?"
+        rc_probe=$?
+        dbg "   probe launch-client(inside-app) rc=$rc_probe"
+        if [ "$rc_probe" != 0 ]; then
+          $to "$lclient" --bus-name="com.steampowered.App$appid" -- true >> "$OUT.log" 2>&1
+          dbg "   probe launch-client(bus-name) rc=$?"
+        fi
+      fi
+      if v=$(pick_nsenter "$pid"); then
+        dbg "   probe nsenter ok: [$v]"
+      else
+        dbg "   probe nsenter: no working option set"
       fi
     fi
   done
@@ -288,7 +320,7 @@ if [ "$MODE" = scan ]; then
   if ! scan_procs /proc; then
     # Running inside a Proton/pressure-vessel container often exposes only its own
     # PID namespace. Re-scan from the host init namespaces when possible.
-    if command -v nsenter >/dev/null 2>&1; then
+    if command -v nsenter >/dev/null 2>&1 && timeout 0.5s nsenter -t 1 -m -p true >/dev/null 2>&1; then
       dbg "retry scan via host namespaces (no cross-prefix candidates in current view)"
       MODE=_scan_host OUT=$OUT OWN=$own OWNMNT=$ownmnt $to nsenter -t 1 -m -p /bin/sh "$0" >> "$OUT.log" 2>&1 || dbg "nsenter host scan failed rc=$?"
     fi
@@ -299,30 +331,142 @@ if [ "$MODE" = _scan_host ]; then
   scan_procs /proc || true
 fi
 
-# Injection is done exclusively with the native ptrace injector that the
-# launcher stages next to this script. No second Wine process and no
-# Windows-side cross-process calls are involved. MODS holds DOS paths of the
-# modules in load order; the last one is marked with the 'PRAC' signature
-# when SIG=1.
-if [ "$MODE" = apply ]; then
-  stage="$HOME/.cache/thprac-wine"
-  mkdir -p "$stage" 2>>"$OUT.log"
-  rc=1
-  if [ -n "$INJ" ] && [ -x "$INJ" ] && [ -n "$MODS" ]; then
-    dbg "== apply: target=$TARGET name=$NAME mods=$MODS"
-    i=0
-    for m in $MODS; do
-      i=$((i+1))
-      extra=
-      [ "$i" = "$MODN" ] && [ "$SIG" = 1 ] && extra=--sig
-      dbg "   try injector: dll=$m extra=$extra"
-      "$INJ" --pid "$TARGET" --dll "$m" $extra --result "$stage/thprac_wineloader.result" >> "$OUT.log" 2>&1
-      rc=$?
-      dbg "   injector rc=$rc"
-      [ "$rc" -eq 0 ] || break
+if [ "$MODE" = apply_inner ]; then
+  # A pressure-vessel sandbox cannot read other containers' /proc entries and
+  # cannot nsenter to the host, so the usual scan is blind there. Instead of
+  # scanning, dispatch the attach helper into the target app's own container
+  # (steam-runtime-launch-client --inside-app): inside, the local wineserver
+  # sees the game and "thprac.exe --attach" attaches without crossing any
+  # namespace. No scan or PID is needed on this side.
+  dbg "== apply_inner: app=$INNERAPP self=$SELF ppid=$PPID"
+  loader=
+  # Derive a Wine loader able to run the 32-bit helper from the Wine that runs
+  # this script (the launcher's process tree).
+  exe=$(readlink "/proc/$PPID/exe" 2>/dev/null)
+  exe=${exe% (deleted)}
+  dir=${exe%/*}
+  for c in "$dir/wine64" "$dir/wine" "$dir/../../../bin/wine64" "$dir/../../../bin/wine"; do
+    if [ -x "$c" ]; then loader=$c; break; fi
+  done
+  if [ -z "$loader" ]; then
+    for c in "$HOME"/.local/share/Steam/steamapps/common/Proton*/files/bin/wine \
+             "$HOME"/.local/share/Steam/steamapps/common/Proton*/dist/bin/wine; do
+      if [ -x "$c" ]; then loader=$c; break; fi
     done
+  fi
+  command -v wine64 >/dev/null 2>&1 && [ -z "$loader" ] && loader=$(command -v wine64)
+  command -v wine >/dev/null 2>&1 && [ -z "$loader" ] && loader=$(command -v wine)
+  [ -n "$loader" ] || loader=wine
+  stage="$HOME/.cache/thprac-wine"
+  mkdir -p "$stage" 2>/dev/null
+  cmp -s "$SELF" "$stage/thprac.exe" 2>/dev/null || cp -f "$SELF" "$stage/thprac.exe"
+  runself=$stage/thprac.exe
+  if [ -n "$lclient" ]; then
+    dbg "   dispatch launch-client inside-app=$INNERAPP loader=$loader runself=$runself"
+    "$lclient" --inside-app="$INNERAPP" --directory=/ \
+      --env="THPRAC_WINE_LOCAL_ONLY=1" --env="THPRAC_ATTACH_WAIT=60" \
+      -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
+    rc=$?
+    dbg "   launch-client(inside-app) rc=$rc"
+    echo "RC $rc" >> "$OUT"
+    [ "$rc" = 0 ] || echo "ERR inside-app dispatch rc=$rc" >> "$OUT"
   else
-    dbg "== apply: injector or module list missing (INJ=[$INJ] MODS=[$MODS])"
+    echo "ERR no usable steam-runtime-launch-client for inside-app dispatch" >> "$OUT"
+  fi
+fi
+
+if [ "$MODE" = apply ]; then
+  loader=$(envof "$TARGET" WINELOADER)
+  if [ -z "$loader" ] || [ ! -x "$loader" ]; then
+    exe=$(readlink "/proc/$TARGET/exe" 2>/dev/null)
+    exe=${exe% (deleted)}
+    dir=${exe%/*}
+    loader=
+    for c in "$dir/wine64" "$dir/wine" "$dir/../../../bin/wine64" "$dir/../../../bin/wine"; do
+      if [ -x "$c" ]; then loader=$c; break; fi
+    done
+  fi
+  [ -n "$loader" ] || loader=wine
+  runself=$SELF
+  dbg "== apply: target=$TARGET needns=$NEEDNS loader=$loader"
+  rc=1
+  if [ "$NEEDNS" = 1 ]; then
+    # The target lives in another mount namespace (Steam's pressure-vessel
+    # container). Its wineserver socket is only reachable from inside, and
+    # starting a second wineserver on the same prefix would be harmful, so
+    # enter that container or give up.
+    dbg "   diag: $(nsenter --version 2>&1 | head -n 1) userns(self)=$(readlink /proc/self/ns/user) userns(target)=$(readlink /proc/$TARGET/ns/user) mntns(target)=$(readlink /proc/$TARGET/ns/mnt)"
+    dbg "   diag: unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null) apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null) max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)"
+    dbg "   diag: target $(grep -E '^(Uid|NoNewPrivs|Seccomp):' /proc/$TARGET/status 2>/dev/null | tr '\n\t' '  ')"
+    stage="$HOME/.cache/thprac-wine"
+    mkdir -p "$stage" 2>/dev/null
+    cmp -s "$SELF" "$stage/thprac.exe" 2>/dev/null || cp -f "$SELF" "$stage/thprac.exe"
+    runself=$stage/thprac.exe
+    tried=0
+    appid=$(envof "$TARGET" SteamAppId)
+    [ -n "$appid" ] || appid=$(envof "$TARGET" SteamGameId)
+    pfx=$(envof "$TARGET" WINEPREFIX)
+    if [ -z "$lclient" ]; then lclient=$(find_launch_client 2>/dev/null || true); fi
+    if [ -n "$lclient" ] && [ -n "$appid" ]; then
+      tried=1
+      dbg "   try launch-client inside-app=$appid path=$lclient"
+      "$lclient" --inside-app="$appid" --directory=/ \
+        --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
+        -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
+      rc=$?
+      dbg "   launch-client(inside-app) rc=$rc"
+      if [ "$rc" != 0 ]; then
+        dbg "   try launch-client bus-name app=$appid path=$lclient"
+        "$lclient" --bus-name="com.steampowered.App$appid" --directory=/ \
+          --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
+          -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
+        rc=$?
+        dbg "   launch-client(bus-name) rc=$rc"
+      fi
+      if [ "$rc" != 0 ] && [ "$lclient" != "steam-runtime-launch-client" ] && command -v steam-runtime-launch-client >/dev/null 2>&1; then
+        dbg "   retry with steam-runtime-launch-client from PATH (inside-app)"
+        steam-runtime-launch-client --inside-app="$appid" --directory=/ \
+          --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
+          -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
+        rc=$?
+        dbg "   launch-client(PATH,inside-app) rc=$rc"
+      fi
+    fi
+    if [ "$rc" != 0 ] && command -v nsenter >/dev/null 2>&1; then
+      tried=1
+      dbg "   try nsenter"
+      if nsv=$(pick_nsenter "$TARGET"); then
+        dbg "   nsenter options: [$nsv]"
+        LOADER=$loader; RUNSELF=$runself; export LOADER RUNSELF
+        nsenter -t "$TARGET" $nsv xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" env -u WINESERVERSOCKET THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
+          < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
+        rc=$?
+        dbg "   nsenter rc=$rc"
+        if [ "$rc" != 0 ]; then
+          # Try with an explicit wineserver socket inside the target container.
+          sock=$(ls -1t "/proc/$TARGET/root/tmp/.wine-$UID"/server-*/socket 2>/dev/null | head -n 1)
+          if [ -n "$sock" ]; then
+            sock_in=${sock#"/proc/$TARGET/root"}
+            dbg "   retry nsenter with WINESERVERSOCKET=$sock_in"
+            nsenter -t "$TARGET" $nsv xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" WINESERVERSOCKET='"$sock_in"' THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
+              < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
+            rc=$?
+            dbg "   nsenter(socket) rc=$rc"
+          fi
+        fi
+      else
+        dbg "   nsenter: cannot enter the container (no option set worked)"
+      fi
+    fi
+    if [ "$tried" = 0 ]; then
+      echo "ERR neither steam-runtime-launch-client nor nsenter is usable" >> "$OUT"
+    fi
+  else
+    LOADER=$loader; RUNSELF=$runself; export LOADER RUNSELF
+    xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" env -u WINESERVERSOCKET THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
+      < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
+    rc=$?
+    dbg "   direct rc=$rc"
   fi
   echo "RC $rc" >> "$OUT"
 fi
@@ -348,122 +492,8 @@ struct ScriptResult {
     bool done = false;
 };
 
-// ---------------------------------------------------------------------------
-// Staging. The native injector and the modules it must load are copied into
-// $HOME/.cache/thprac-wine so they are visible from every Wine/Proton
-// container (all of them bind-mount the home directory). Returns the injector
-// as a Unix path and the modules as DOS paths in load order; the 'PRAC'
-// signature is applied to the last module.
-// ---------------------------------------------------------------------------
-struct StagedInject {
-    std::string injector;             // Unix path, executable
-    std::vector<std::string> modules; // DOS paths for --dll
-    std::string findName;             // game exe basename for --find
-};
-
-bool HomeUnixPath(std::string& out) {
-    wchar_t home[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"HOME", home, MAX_PATH);
-    if (n && n < MAX_PATH && home[0] == L'/') {
-        out = utf16_to_utf8(home);
-        return true;
-    }
-    // No HOME (e.g. started by a bare wine without it)? Fall back to the Z:
-    // mapping of the profile directory.
-    wchar_t profile[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH)) {
-        std::string p = ToUnixPath(profile);
-        if (!p.empty()) {
-            out = p;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool StageInjectFiles(bool nc, const char* findName, StagedInject& staged) {
-    staged = {};
-    std::wstring bundleDir;
-    if (!NativeBundle::Present() || !NativeBundle::Prepare(bundleDir)) {
-        DebugLog("staging: no embedded bundle");
-        return false;
-    }
-    std::string homeU;
-    if (!HomeUnixPath(homeU)) {
-        DebugLog("staging: cannot resolve $HOME");
-        return false;
-    }
-    std::string stageU = homeU + "/.cache/thprac-wine";
-    std::wstring stageD = ToDosPath(stageU);
-    if (stageD.empty() || (GetFileAttributesW(stageD.c_str()) == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(stageD.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)) {
-        DebugLog("staging: cannot create " + stageU);
-        return false;
-    }
-    wchar_t self[MAX_PATH * 2] = {};
-    if (!GetModuleFileNameW(nullptr, self, (DWORD)std::size(self))) return false;
-
-    // Module copies live under $HOME; build their DOS form through ToDosPath.
-    auto dosIn = [&](const char* name) -> std::string {
-        std::wstring d = ToDosPath(stageU + "/" + name);
-        return d.empty() ? std::string() : utf16_to_utf8(d.c_str());
-    };
-
-    // Always refresh the injector: it changes with every build.
-    {
-        std::wstring src = bundleDir + L"\\thprac-injector";
-        std::wstring dst = stageD + L"\\thprac-injector";
-        if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-            DebugLog("staging: cannot copy thprac-injector");
-            return false;
-        }
-    }
-    staged.injector = stageU + "/thprac-injector";
-
-    if (nc) {
-        // freetype is statically linked into the module, so a single load is
-        // enough.
-        for (const char* name : { "thprac_th06nc.dll" }) {
-            std::wstring src = bundleDir + L"\\" + utf8_to_utf16(name);
-            std::wstring dst = stageD + L"\\" + utf8_to_utf16(name);
-            if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-                DebugLog(std::string("staging: cannot copy ") + name);
-                return false;
-            }
-            staged.modules.push_back(dosIn(name));
-        }
-        // Hand the launch options over through the filesystem; $HOME is
-        // shared between containers, so the module reads them wherever it
-        // was loaded.
-        LaunchOptions opts{};
-        opts.practice = 1;
-        opts.language = Gui::LocaleGet();
-        WriteLaunchOptionsFile(opts);
-        staged.findName = findName && *findName ? findName : "th06nc.exe";
-    } else {
-        std::string selfU = ToUnixPath(self);
-        std::wstring srcD = ToDosPath(selfU);
-        if (srcD.empty()) {
-            DebugLog("staging: cannot translate the launcher path");
-            return false;
-        }
-        std::wstring dst = stageD + L"\\thprac.exe";
-        if (!CopyFileW(srcD.c_str(), dst.c_str(), FALSE)) {
-            DebugLog("staging: cannot copy the launcher module");
-            return false;
-        }
-        staged.modules.push_back(dosIn("thprac.exe"));
-        staged.findName = findName && *findName ? findName : "thprac.exe";
-    }
-    for (const auto& m : staged.modules) {
-        if (m.empty()) {
-            DebugLog("staging: module path translation failed");
-            return false;
-        }
-    }
-    return !staged.modules.empty();
-}
-
-bool RunScript(const char* mode, int target, const StagedInject& staged, DWORD timeoutMs, ScriptResult& result) {
+bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, ScriptResult& result,
+    const std::string& extraVars = std::string()) {
     wchar_t tmp[MAX_PATH + 1] = {};
     DWORD n = GetTempPathW(MAX_PATH, tmp);
     if (!n || n > MAX_PATH) {
@@ -487,31 +517,32 @@ bool RunScript(const char* mode, int target, const StagedInject& staged, DWORD t
     std::wstring outW = base + L".out";
     std::wstring logW = base + L".out.log";
 
+    wchar_t self[MAX_PATH * 2] = {};
+    if (!GetModuleFileNameW(nullptr, self, (DWORD)std::size(self))) {
+        DebugLog("GetModuleFileNameW failed");
+        return false;
+    }
+
     if (!WriteAll(outW, "")) {
         DebugLog("cannot create temp file in " + utf16_to_utf8(tmp));
         return false;
     }
     std::string outU = ToUnixPath(outW);
-    DebugLog(std::string("[") + mode + "] out=" + outU);
-    if (outU.empty()) {
+    std::string selfU = ToUnixPath(self);
+    DebugLog(std::string("[") + mode + "] out=" + outU + " self=" + selfU);
+    if (outU.empty() || selfU.empty()) {
         DebugLog("cannot translate paths to Unix form; cross-prefix attach unavailable");
         DeleteFileW(outW.c_str());
         return false;
     }
-    std::string mods;
+
     std::string script = "MODE=" + ShellQuote(mode)
         + "\nOUT=" + ShellQuote(outU)
-        + "\nINJ=" + ShellQuote(staged.injector)
+        + "\nSELF=" + ShellQuote(selfU)
         + "\nTARGET=" + std::to_string(target)
-        + "\nNAME=" + ShellQuote(staged.findName)
-        + "\nSIG=1"
-        + "\nMODN=" + std::to_string(staged.modules.size())
-        + "\nMODS=";
-    for (size_t i = 0; i < staged.modules.size(); ++i) {
-        if (i) mods += " ";
-        mods += ShellQuote(staged.modules[i]);
-    }
-    script += mods + "\n" + kScriptBody;
+        + "\nNEEDNS=" + (needNs ? "1" : "0")
+        + "\n" + extraVars
+        + "\n" + kScriptBody;
     if (!WriteAll(scriptW, script)) {
         DebugLog("cannot write helper script");
         DeleteFileW(outW.c_str());
@@ -562,18 +593,6 @@ bool RunScript(const char* mode, int target, const StagedInject& staged, DWORD t
     return started && result.done;
 }
 
-// ---------------------------------------------------------------------------
-// ptrace-based injection. A native helper (tools/thprac_injector.c, shipped in
-// the bundle) attaches to the target with ptrace and remotely calls
-// ntdll!LdrLoadDll on a tiny loader DLL. The loader DLL then runs the second
-// stage inside the target's prefix/container: the cfg command spawns the same
-// native injector (now with cap_sys_ptrace set) against the game process to
-// LdrLoadDll the full thprac module and mark it applied. This bypasses the
-// fragile launch-client/nsenter dance entirely when the caller is allowed to
-// ptrace the target (kernel.yama.ptrace_scope / cap_sys_ptrace).
-// ---------------------------------------------------------------------------
-
-
 std::vector<std::string> SplitLines(const std::string& text) {
     std::vector<std::string> lines;
     size_t pos = 0;
@@ -621,7 +640,6 @@ std::vector<Candidate> ParseCandidates(const std::string& out) {
 std::set<int> g_tried; // Unix PIDs already attempted (non-manual polling only)
 ULONGLONG g_lastScan = 0;
 bool g_scannedOnce = false;
-bool g_ptraceDenied = false; // last attach round was blocked by ptrace permissions
 
 } // namespace
 
@@ -647,18 +665,66 @@ bool IsWine() {
     return cached == 1;
 }
 
-bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted) {
-    if (!IsWine()) {
-        DebugLog("skip: not running under Wine", true);
-        return false;
+std::string DosToUnixPath(const std::string& dosUtf8) {
+    if (dosUtf8.empty() || !IsWine()) {
+        return {};
     }
-    // Set for the helper process we start inside another prefix, so that it
-    // only handles its own prefix and never recurses.
-    if (GetEnvironmentVariableW(L"THPRAC_WINE_LOCAL_ONLY", nullptr, 0) > 0) {
-        DebugLog("skip: THPRAC_WINE_LOCAL_ONLY set", true);
-        return false;
+    std::wstring wide = utf8_to_utf16(dosUtf8.c_str());
+    // wine_get_unix_file_name builds a path even for files that do not exist; for a
+    // path registered in another prefix that would be a wrong Linux path.
+    if (GetFileAttributesW(wide.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return {};
     }
+    return ToUnixPath(wide);
+}
 
+std::string UnixToDosPath(const std::string& unixUtf8) {
+    if (unixUtf8.empty() || unixUtf8[0] != '/' || !IsWine()) {
+        return {};
+    }
+    return utf16_to_utf8(ToDosPath(unixUtf8).c_str());
+}
+
+// Steam AppID of a game whose container the attach helper can be dispatched
+// into directly (see TryInnerAppAttach); nullptr when unknown.
+static const char* KnownSteamAppId(THGameID wanted) {
+    return wanted == ID_TH06NC ? "4659620" : nullptr;
+}
+
+// The plain scan cannot see processes of other Steam containers from inside a
+// pressure-vessel sandbox (their /proc entries are unreadable and nsenter to
+// the host fails with EPERM). For games with a known AppID the attach helper
+// can instead be dispatched straight into the game's own container via
+// steam-runtime-launch-client, where the local wineserver sees the game.
+static bool TryInnerAppAttach(THGameID wanted, bool prompt, const char* steamAppId) {
+    const char* appId = (steamAppId && *steamAppId) ? steamAppId : KnownSteamAppId(wanted);
+    if (!appId) {
+        return false;
+    }
+    DebugLog(std::string("no scan candidates; dispatching attach into app container ") + appId, true);
+    // The dispatched helper waits up to 60s for the game to appear
+    // (THPRAC_ATTACH_WAIT), so one dispatch covers the whole launch window.
+    ScriptResult inner;
+    if (!RunScript("apply_inner", 0, false, 90000, inner, std::string("INNERAPP=") + appId)) {
+        DebugLog("apply_inner: script failed to start/complete", true);
+        return false;
+    }
+    bool success = false;
+    for (const auto& line : SplitLines(inner.out)) {
+        if (line == "RC 0") {
+            success = true;
+        } else if (line.rfind("ERR ", 0) == 0) {
+            DebugLog(line.substr(4));
+        }
+    }
+    DebugLog(std::string("apply_inner result: success=") + (success ? "1" : "0"), true);
+    if (success && prompt) {
+        log_mbox(0, MB_ICONASTERISK | MB_OK, S(THPRAC_PR_COMPLETE), S(THPRAC_PR_INFO_ATTACHED));
+    }
+    return success;
+}
+
+static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId) {
     // FindAndAttach is polled every frame while waiting for a launched game.
     ULONGLONG now = GetTickCount64();
     if (!manual && g_lastScan && now - g_lastScan < 3000) {
@@ -672,8 +738,20 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
     }
     DebugLog(std::string("AttachOtherPrefixes wanted=") + std::to_string((int)wanted) + " manual=" + (manual ? "1" : "0") + " prompt=" + (prompt ? "1" : "0"), true);
 
+    // The dispatch into the game's own container hooks immediately (the helper
+    // waits there for the game to appear), so prefer it whenever the Steam
+    // AppID is known. Inside a Proton container the plain scan is also blind
+    // (other containers' /proc entries are unreadable) and takes >15s.
+    const char* appId = (steamAppId && *steamAppId) ? steamAppId : KnownSteamAppId(wanted);
+    if (appId) {
+        bool handled = TryInnerAppAttach(wanted, prompt, appId);
+        if (handled) {
+            return handled;
+        }
+    }
+
     ScriptResult scan;
-    if (!RunScript("scan", 0, StagedInject{}, 15000, scan)) {
+    if (!RunScript("scan", 0, false, 15000, scan)) {
         DebugLog("scan failed to start/complete", true);
         return false;
     }
@@ -714,25 +792,14 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
         }
 
         DebugLog("applying to " + c.name + " (pid " + std::to_string(c.pid) + ") in Wine prefix " + prefix + (c.otherNs ? " [other namespace]" : ""));
+        ScriptResult apply;
+        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply);
+
         bool success = false;
-        bool ran = false;
-        bool ptraceDenied = false;
-        {
-            // Injection is done exclusively by the native ptrace injector,
-            // staged into the shared home directory. No second Wine process,
-            // no Windows-side cross-process calls.
-            StagedInject staged;
-            if (StageInjectFiles(c.id == ID_TH06NC, c.name.c_str(), staged)) {
-                ScriptResult apply;
-                ran = RunScript("apply", c.pid, staged, 120000, apply);
-                for (const auto& line : SplitLines(apply.out)) {
-                    if (line == "RC 0") success = true;
-                    else if (line == "RC 3") ptraceDenied = true;
-                    else if (line.rfind("ERR ", 0) == 0) DebugLog(line.substr(4));
-                }
-            }
+        for (const auto& line : SplitLines(apply.out)) {
+            if (line == "RC 0") success = true;
+            else if (line.rfind("ERR ", 0) == 0) DebugLog(line.substr(4));
         }
-        g_ptraceDenied |= ptraceDenied;
         handled = true;
         DebugLog(std::string("apply result: ran=") + (ran ? "1" : "0") + " success=" + (success ? "1" : "0"), true);
         if (ran && success) {
@@ -742,102 +809,72 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
             }
         } else {
             if (prompted) *prompted = true;
-            std::string text = S(THPRAC_PR_ERR_ATTACH);
-            if (g_ptraceDenied && S(THPRAC_WINE_PTRACE_CAP)) {
-                text += "\n\n";
-                text += S(THPRAC_WINE_PTRACE_CAP);
-            }
-            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), text.c_str());
+            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
         }
     }
     if (!handled) DebugLog("no cross-prefix game handled", true);
     return handled;
 }
 
-// Dispatch the attach helper into a Steam app's own container. Used when a
-// containerized launcher (a Steam shortcut) starts a game via a steam:// URL:
-// the launcher cannot scan other containers (procfs is masked and nsenter is
-// not permitted), so instead of waiting for a scan that never succeeds, the
-// helper is started where the game lives through steam-runtime-launch-client
-// --inside-app, which is the same channel the apply stage uses.
-// Dispatch the native injector into a Steam app's own container. Used when a
-// containerized launcher (a Steam shortcut) starts a game via a steam:// URL:
-// the launcher cannot scan other containers (procfs is masked), so instead of
-// waiting for a scan that never succeeds, the injector is started where the
-// game lives through steam-runtime-launch-client --inside-app. Everything it
-// needs is staged into $HOME/.cache/thprac-wine beforehand.
-void DispatchSteamHook(const wchar_t* steamUrl, THGameID gameId) {
-    const wchar_t* rid = wcsstr(steamUrl ? steamUrl : L"", L"rungameid/");
-    if (!rid) return;
-    unsigned long long id = wcstoull(rid + 10, nullptr, 10);
-    if (!id) return;
-    // Shortcut GameIDs carry the appid in the high 32 bits; plain appids are
-    // used directly for real Steam apps.
-    unsigned long long appid = (id >> 32) ? (id >> 32) : id;
+static std::atomic<bool> g_asyncRunning = false;
+static std::atomic<bool> g_asyncSuccess = false;
 
-    bool nc = gameId == ID_TH06NC;
-    std::string exeName = PrimaryExeNameForGame(gameId);
-    if (exeName.empty()) exeName = nc ? "th06nc.exe" : "thprac.exe";
+struct AsyncScanArgs {
+    THGameID wanted;
+    std::string steamAppId;
+};
 
-    StagedInject staged;
-    if (!StageInjectFiles(nc, exeName.c_str(), staged)) {
-        DebugLog("hook dispatch: staging failed", true);
-        return;
-    }
+static DWORD WINAPI AsyncAttachThread(LPVOID param) {
+    auto* args = static_cast<AsyncScanArgs*>(param);
+    THGameID wanted = args->wanted;
+    delete args;
 
-    std::string mods;
-    for (size_t i = 0; i < staged.modules.size(); ++i) {
-        if (i) mods += " ";
-        mods += "'" + staged.modules[i] + "'";
+    bool dummyPrompted = false;
+    bool success = AttachOtherPrefixesSync(wanted, false, false, &dummyPrompted, args->steamAppId.c_str());
+    if (success) {
+        g_asyncSuccess.store(true, std::memory_order_release);
     }
-    char appidText[32];
-    snprintf(appidText, sizeof(appidText), "%llu", appid);
-    std::string injU = staged.injector;
-    std::string findName = staged.findName;
-    std::string homeU;
-    std::string resD;
-    if (HomeUnixPath(homeU)) {
-        std::wstring resDos = ToDosPath(homeU + "/.cache/thprac-wine/hook.result");
-        if (!resDos.empty()) resD = utf16_to_utf8(resDos.c_str());
-    }
-    if (resD.empty()) resD = "/home-nonexistent/thprac-hook.result";
-    std::string snippet = std::string(
-        "log=\"$HOME/thprac-hook.log\"\n"
-        "echo \"== hook dispatch appid=") + appidText + " $(date 2>/dev/null)\" >> \"$log\"\n"
-        "stage=\"$HOME/.cache/thprac-wine\"\n"
-        "mkdir -p \"$stage\" 2>>\"$log\"\n"
-        "inj=" + ShellQuote(injU) + "\n"
-        "name=" + ShellQuote(findName) + "\n"
-        "mods=" + mods + "\n"
-        "chmod +x \"$inj\" 2>>\"$log\"\n"
-        "setcap cap_sys_ptrace=ep \"$inj\" 2>>\"$log\"\n"
-        "pfx=\n"
-        "for base in ${STEAM_COMPAT_CLIENT_INSTALL_PATH:+\"$STEAM_COMPAT_CLIENT_INSTALL_PATH\"} \"$HOME/.local/share/Steam\" $(sed -n 's/^[[:space:]]*\"path\"[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$HOME/.local/share/Steam/steamapps/libraryfolders.vdf\" 2>/dev/null); do\n"
-        "  [ -n \"$base\" ] || continue\n"
-        "  if [ -d \"$base/steamapps/compatdata/$appid/pfx\" ]; then pfx=\"$base/steamapps/compatdata/$appid/pfx\"; break; fi\n"
-        "done\n"
-        "if [ -z \"$pfx\" ]; then echo \"ERR no compatdata/$appid\" >> \"$log\"; exit 2; fi\n"
-        "lclient=$(command -v steam-runtime-launch-client 2>/dev/null)\n"
-        "if [ -z \"$lclient\" ]; then echo \"ERR no steam-runtime-launch-client\" >> \"$log\"; exit 3; fi\n"
-        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do\n"
-        "  echo \"-- hook attempt $i\" >> \"$log\"\n"
-        "  nmods=0\n"
-        "  for m in $mods; do nmods=$((nmods+1)); done\n"
-        "  ok=1\n"
-        "  n=0\n"
-        "  for m in $mods; do\n"
-        "    n=$((n+1))\n"
-        "    extra=\n"
-        "    [ \"$n\" = \"$nmods\" ] && extra=--sig\n"
-        "    \"$lclient\" --inside-app=\"$appid\" --directory=/ -- \"$inj\" --find \"$name\" --dll \"$m\" $extra --wait 10 --result " + ShellQuote(resD) + " >> \"$log\" 2>&1 || ok=0\n"
-        "  done\n"
-        "  if [ \"$ok\" = 1 ]; then echo \"OK attached (attempt $i)\" >> \"$log\"; exit 0; fi\n"
-        "  sleep 3\n"
-        "done\n"
-        "echo \"ERR game never appeared\" >> \"$log\"\n"
-        "exit 4\n";
-    DebugLog("hook dispatch: appid=" + std::string(appidText) + " nc=" + (nc ? "1" : "0") + " via launch-client --inside-app", true);
-    RunShellCommand(utf8_to_utf16(snippet.c_str()).c_str());
+    g_asyncRunning.store(false, std::memory_order_release);
+    return 0;
 }
+
+bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId) {
+    if (!IsWine()) {
+        DebugLog("skip: not running under Wine", true);
+        return false;
+    }
+    // Set for the helper process we start inside another prefix, so that it
+    // only handles its own prefix and never recurses.
+    if (GetEnvironmentVariableW(L"THPRAC_WINE_LOCAL_ONLY", nullptr, 0) > 0) {
+        DebugLog("skip: THPRAC_WINE_LOCAL_ONLY set", true);
+        return false;
+    }
+
+    if (!manual) {
+        if (g_asyncSuccess.exchange(false, std::memory_order_acq_rel)) {
+            return true;
+        }
+        if (g_asyncRunning.load(std::memory_order_acquire)) {
+            return false;
+        }
+        ULONGLONG now = GetTickCount64();
+        if (g_lastScan && now - g_lastScan < 3000) {
+            return false;
+        }
+        g_asyncRunning.store(true, std::memory_order_release);
+        auto* args = new AsyncScanArgs{ wanted, steamAppId ? steamAppId : "" };
+        HANDLE hThread = CreateThread(nullptr, 0, AsyncAttachThread, args, 0, nullptr);
+        if (hThread) {
+            CloseHandle(hThread);
+        } else {
+            g_asyncRunning.store(false, std::memory_order_release);
+            delete args;
+        }
+        return false;
+    }
+
+    return AttachOtherPrefixesSync(wanted, manual, prompt, prompted, steamAppId);
+}
+
 }
 }

@@ -15,6 +15,10 @@ namespace Gui {
     extern HWND ImplWin32GetHwnd();
 }
 
+// thprac_load_exe.cpp: maps a Wine path registered in another prefix to one that
+// exists here (returns the argument unchanged when it already exists).
+std::wstring ResolveGamePath(const wchar_t* path);
+
 inline bool LargeBottomButton(const char* text, float height, float offset = 0.0f) {
     height *= g_Scale;
 
@@ -359,6 +363,60 @@ static bool LauncherRunWithThcrap(std::wstring_view dir, std::wstring_view runcf
     return false;
 }
 
+// Mirrors the bridge's prefixIsGame() (thprac_th06nc.cpp): the game may only
+// be started directly by the bridge when the launcher runs inside th06nc's
+// own Proton prefix; elsewhere the game must be started through Steam and
+// attached via FindAndAttach.
+static bool InNCGamePrefix() {
+    for (const wchar_t* name : { L"STEAM_COMPAT_DATA_PATH", L"WINEPREFIX" }) {
+        wchar_t buf[1024] {};
+        DWORD n = GetEnvironmentVariableW(name, buf, 1024);
+        if (!n || n >= 1024) {
+            continue;
+        }
+        std::wstring v(buf, buf + n);
+        for (auto& c : v) {
+            if (c == L'\\') {
+                c = L'/';
+            }
+            if (c >= L'A' && c <= L'Z') {
+                c = wchar_t(c + 32);
+            }
+        }
+        if (v.find(L"compatdata/4659620") != std::wstring::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Extract a Steam AppID from a launch command ("steam://rungameid/N",
+// "steam steam://rungameid/N", "steam -applaunch N", ...). Empty when the
+// command does not name a Steam app.
+static std::string SteamAppIdFromCommand(const std::string& command) {
+    std::string lower = command;
+    for (auto& c : lower) {
+        if (c >= 'A' && c <= 'Z') {
+            c = char(c + 32);
+        }
+    }
+    for (const char* needle : { "rungameid/", "-applaunch " }) {
+        size_t at = lower.find(needle);
+        if (at == std::string::npos) {
+            continue;
+        }
+        size_t begin = at + strlen(needle);
+        size_t end = begin;
+        while (end < command.size() && command[end] >= '0' && command[end] <= '9') {
+            ++end;
+        }
+        if (end > begin) {
+            return command.substr(begin, end - begin);
+        }
+    }
+    return {};
+}
+
 static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstance* inst) {
     if (state->reflectiveLaunchID == game) {
         ImGui::OpenPopup(S(THPRAC_GAMES_CANNOT_LAUNCH_MODAL));
@@ -370,32 +428,49 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
     switch (state->settings.after_launch) {
     case LAUNCH_CLOSE:
         state->closeAfterLaunch = true;
+        break;
     case LAUNCH_MINIMIZE:
-        ShowWindow(Gui::ImplWin32GetHwnd(), SW_MINIMIZE);
+        // Do not minimize the launcher when a game starts: the user asked for
+        // the window to stay put (this case is kept so saved settings still
+        // parse, but it no longer moves the window).
         break;
     case LAUNCH_NOTHING:
         break;
     }
-    if (game == ID_TH06NC && inst->type != TYPE_COMMAND) return LaunchTH06NC(inst->apply_thprac, 0, inst->low_latency);
+    if (game == ID_TH06NC) {
+        std::wstring cmd = (inst->path && *inst->path) ? utf8_to_utf16(inst->path)
+                                                       : L"steam steam://rungameid/4659620";
+        SetEnvironmentVariableW(L"THPRAC_LAUNCH_CMD", cmd.c_str());
+        // The bridge can only inject into a game it started in its own prefix.
+        // When the launcher runs outside the game's Proton prefix (e.g. from a
+        // plain Wine prefix), start the game here and let the per-frame
+        // FindAndAttach reach it, including through the cross-prefix helper.
+        if (inst->apply_thprac && WineAttach::IsWine() && !InNCGamePrefix()) {
+            if (!RunLaunchCommand(cmd.c_str())) {
+                log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_GAMES_COMMAND_FAILED));
+                return false;
+            }
+            state->reflectiveLaunchID = game;
+            state->reflectiveAppId = "4659620";
+            return true;
+        }
+        return LaunchTH06NC(inst->apply_thprac, 0, inst->low_latency);
+    }
     if (inst->type != TYPE_THCRAP) {
         if (inst->type == TYPE_COMMAND) {
             // Run the user-registered launch command (Wine/Proton/Steam/...)
             // and hook thprac into the game once its process shows up.
             if (inst->apply_thprac) {
                 state->reflectiveLaunchID = game;
+                state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
             }
             if (!RunLaunchCommand(utf8_to_utf16(inst->path).c_str())) {
                 if (inst->apply_thprac) {
                     state->reflectiveLaunchID = ID_UNKNOWN;
+                    state->reflectiveAppId.clear();
                 }
                 log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_GAMES_COMMAND_FAILED));
                 return false;
-            }
-            // A containerized launcher cannot see other containers' processes,
-            // so the regular scan would never find the game we just launched;
-            // send the attach helper into the target app's container instead.
-            if (inst->apply_thprac && IsProtonContainer() && wcsstr(utf8_to_utf16(inst->path).c_str(), L"steam://")) {
-                WineAttach::DispatchSteamHook(utf8_to_utf16(inst->path).c_str(), game);
             }
             return true;
         }
@@ -415,17 +490,14 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
         else {
             if (inst->apply_thprac) {
                 state->reflectiveLaunchID = game;
+                state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
             }
             // Steam entries hold steam:// URLs; dispatch them through the
             // shared runner so containerized launchers can reach the host
             // Steam client as well.
             std::wstring target = utf8_to_utf16(inst->path);
             if (target.find(L"steam://") != std::wstring::npos) {
-                bool ok = RunLaunchCommand(target.c_str());
-                if (ok && inst->apply_thprac && IsProtonContainer()) {
-                    WineAttach::DispatchSteamHook(target.c_str(), game);
-                }
-                return ok;
+                return RunLaunchCommand(target.c_str());
             }
             ShellExecuteW(Gui::ImplWin32GetHwnd(), L"open", target.c_str(), nullptr, nullptr, SW_SHOW);
             return true;
@@ -501,6 +573,23 @@ static void InitLauncherGame(LauncherState* state, LauncherGame* game, yyjson_va
         // Command instances have no executable to version-check.
         if (type == TYPE_COMMAND && ver_off == 0xFF) {
             ver_off = 0;
+        }
+
+        // Executable paths are stored as Linux paths so that they are valid in every
+        // Wine prefix; convert them to a path usable in this prefix. Entries that
+        // were registered earlier with a Wine path (C:\users\<name>\...) are mapped
+        // to this prefix if that path does not exist here.
+        if (type != TYPE_THCRAP && type != TYPE_COMMAND && type != TYPE_STEAM && WineAttach::IsWine()) {
+            std::string resolved;
+            if (path[0] == '/') {
+                resolved = WineAttach::UnixToDosPath(path);
+            } else {
+                resolved = utf16_to_utf8(ResolveGamePath(utf8_to_utf16(path).c_str()).c_str());
+            }
+            if (!resolved.empty() && resolved != path) {
+                free((void*)path);
+                path = _strdup(resolved.c_str());
+            }
         }
 
         ver = game->versions + ver_off;
@@ -606,7 +695,19 @@ void SaveGamesJson() {
             yyjson_mut_obj_add_str(doc, inst, "name", game.instances[i].name);
             yyjson_mut_obj_add_int(doc, inst, "ver",  game.instances[i].ver);
             yyjson_mut_obj_add_int(doc, inst, "type", game.instances[i].type);
-            yyjson_mut_obj_add_str(doc, inst, "path", game.instances[i].path);
+            // Store executable paths as Linux paths (see InitLauncherGame). Only existing
+            // files are converted, and paths that are already Linux paths stay as they are.
+            std::string storedPath = game.instances[i].path ? game.instances[i].path : "";
+            {
+                const THGameType storedType = game.instances[i].type;
+                if (!storedPath.empty() && storedPath[0] != '/' && storedType != TYPE_THCRAP && storedType != TYPE_COMMAND && storedType != TYPE_STEAM) {
+                    std::string unixPath = WineAttach::DosToUnixPath(storedPath);
+                    if (!unixPath.empty()) {
+                        storedPath = unixPath;
+                    }
+                }
+            }
+            yyjson_mut_obj_add_strcpy(doc, inst, "path", storedPath.c_str());
             yyjson_mut_obj_add_bool(doc, inst, "apply_thprac", game.instances[i].apply_thprac);
             if(game.id == ID_TH06NC)
                 yyjson_mut_obj_add_bool(doc, inst, "low_latency", game.instances[i].low_latency);
@@ -971,7 +1072,7 @@ static bool DetailsPage(LauncherState* state) {
     ImGui::SameLine();
     Gui::HelpMarker(S(THPRAC_GAMES_DEFAULT_LAUNCH_DESC));
 
-    if(game->id == ID_TH06NC && inst->type != TYPE_COMMAND) {
+    if(game->id == ID_TH06NC) {
         ImGui::Checkbox(S(THPRAC_GAMES_LOW_LATENCY), &inst->low_latency);
         ImGui::SameLine();
         Gui::HelpMarker(S(THPRAC_GAMES_LOW_LATENCY_DESC));
@@ -995,6 +1096,7 @@ static bool DetailsPage(LauncherState* state) {
     if (state->reflectiveLaunchID == game->id) {
         if (LargeBottomButton(S(THPRAC_GAMES_LAUNCH_ABORT_WAIT), 64.0f)) {
             state->reflectiveLaunchID = ID_UNKNOWN;
+            state->reflectiveAppId.clear();
             state->closeAfterLaunch = false;
         }
     } else {
@@ -1924,6 +2026,7 @@ void LauncherGamesMain(LauncherState* state) {
             switch (Gui::MultiButtonsFillWindow(0.0f, S(TH_YES), S(TH_NO))) {
             case 0:
                 state->reflectiveLaunchID = ID_UNKNOWN;
+                state->reflectiveAppId.clear();
                 state->closeAfterLaunch = false;
             case 1:
                 ImGui::CloseCurrentPopup();

@@ -197,6 +197,9 @@ struct LauncherState {
     LauncherGame* selectedGame = nullptr;
     LauncherGame* hoveredGame = nullptr;
     THGameID reflectiveLaunchID = ID_UNKNOWN;
+    // Steam AppID parsed from the launch command, used to hand the attach to
+    // the game's own container (see WineAttach::AttachOtherPrefixes).
+    std::string reflectiveAppId;
     LauncherThcrapSelection thcrapSel;
 
     th_glossary_t thcrapError = A0000ERROR_C;

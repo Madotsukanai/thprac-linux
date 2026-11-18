@@ -46,6 +46,14 @@ inline bool RunShellCommand(const wchar_t* command) {
         }
     }
     std::wstring params = L"-c \"" + escaped + L"\"";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    std::wstring fullCmd = L"\"Z:\\bin\\sh\" " + params;
+    if (CreateProcessW(L"Z:\\bin\\sh", fullCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return true;
+    }
     // ShellExecuteW resolves the Unix binary through the Z: drive mapping.
     HINSTANCE result = ShellExecuteW(nullptr, L"open", L"Z:\\bin\\sh", params.c_str(), nullptr, SW_HIDE);
     return (INT_PTR)result > 32;
@@ -88,7 +96,7 @@ inline bool RunLaunchCommand(const wchar_t* command) {
 // Cross-bitness is handled by a companion built from this same source tree.
 inline bool LaunchTH06NC(bool practice, DWORD attachPid = 0, bool lowLatency = false) {
     if (!practice && !attachPid && !lowLatency)
-        return RunLaunchCommand(L"steam://rungameid/4659620");
+        return RunLaunchCommand(L"steam steam://rungameid/4659620");
     AttachLog("LaunchTH06NC practice=%d pid=%lu lowLatency=%d", practice ? 1 : 0, (unsigned long)attachPid, lowLatency ? 1 : 0);
     std::wstring helper;
     if (NativeBundle::Present()) {

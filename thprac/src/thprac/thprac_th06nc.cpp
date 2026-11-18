@@ -23,6 +23,13 @@ void log(const std::wstring& text) {
         (*f)<<u<<"\n"; f->flush();
     }
 }
+static std::string wToUtf8(const std::wstring& text) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string u(n > 1 ? n - 1 : 0, (char)0);
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, u.data(), n, nullptr, nullptr);
+    u.resize(n > 1 ? (size_t)n - 1 : 0);
+    return u;
+}
 void failure(const std::wstring& text) { log(L"FAIL: "+text); MessageBoxW(nullptr,text.c_str(),L"thprac-linux",MB_ICONERROR); }
 void disconnect() { if(shared)UnmapViewOfFile(shared);if(mapping)CloseHandle(mapping);if(mutex)CloseHandle(mutex);shared=nullptr;mapping=nullptr;mutex=nullptr;targetPid=0; }
 const wchar_t* localized(int language,const wchar_t* zh,const wchar_t* en,const wchar_t* ja) {
@@ -154,62 +161,95 @@ uintptr_t remoteModule(DWORD pid,const std::wstring& name) {
     if(Module32FirstW(snapshot,&item))do{if(_wcsicmp(item.szModule,name.c_str())==0){result=(uintptr_t)item.modBaseAddr;break;}}while(Module32NextW(snapshot,&item));
     CloseHandle(snapshot);return result;
 }
-// Run the native ptrace injector shipped next to this executable. No
-// Windows-side cross-process calls: the injector discovers the game's Linux
-// pid by exe name and loads the module through ntdll!LdrLoadDll.
-bool RunLocalInjector(const std::wstring& dir,const std::wstring& dll) {
-    std::wstring inj=dir+L"thprac-injector";
-    if(GetFileAttributesW(inj.c_str())==INVALID_FILE_ATTRIBUTES){log(L"no injector at "+inj);return false;}
-    wchar_t tmp[MAX_PATH+1]{};DWORD n=GetTempPathW(MAX_PATH,tmp);
-    std::wstring res=(n?std::wstring(tmp):dir)+L"thprac_inj_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount())+L".res";
-    DeleteFileW(res.c_str());
-    std::wstring cmd=L"\""+inj+L"\" --find th06nc.exe --dll \""+dll+L"\" --sig --wait 20 --result \""+res+L"\"";
-    STARTUPINFOW si{sizeof(si)};PROCESS_INFORMATION pi{};
-    wchar_t mut[4096];lstrcpynW(mut,cmd.c_str(),4095);
-    if(!CreateProcessW(inj.c_str(),mut,nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&pi)){log(L"injector spawn fail err="+std::to_wstring(GetLastError()));return false;}
-    CloseHandle(pi.hThread);
-    DWORD startTick=GetTickCount();
-    for(;;){if(WaitForSingleObject(pi.hProcess,500)==WAIT_OBJECT_0)break;if(GetTickCount()-startTick>90000)break;}
-    DWORD code=0;GetExitCodeProcess(pi.hProcess,&code);CloseHandle(pi.hProcess);
-    std::wstring resTxt;
-    HANDLE rf=CreateFileW(res.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
-    if(rf!=INVALID_HANDLE_VALUE){wchar_t b[128]{};DWORD g=0;ReadFile(rf,b,254,&g,nullptr);CloseHandle(rf);resTxt.assign(b,g/2);}
-    DeleteFileW(res.c_str());
-    log(L"injector rc="+std::to_wstring((unsigned long long)code)+L" result="+resTxt);
-    return code==0;
-}
 bool attach(DWORD pid,const LaunchOptions& options) {
     if(shared){if(pid==targetPid)return true;disconnect();}
     LaunchOptions opts=options;
-    HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_CREATE_THREAD|PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,pid);
+    if(!process){
+        for(int i=0;i<20&&!process;++i){
+            Sleep(100);
+            process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_CREATE_THREAD|PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,pid);
+        }
+    }
     if(!process){failure(L"无法打开游戏进程，错误 "+std::to_wstring(GetLastError()));return false;}
     wchar_t path[32768];DWORD length=32768;
     log(std::wstring(L"attach pid=")+std::to_wstring(pid));
     GameBuild build=GameBuild::Unsupported;
-    if(!QueryFullProcessImageNameW(process,0,path,&length)||(build=identifyBuild(path))==GameBuild::Unsupported){ log(std::wstring(L"unsupported: ")+path);
-      CloseHandle(process);failure(L"EXE 的 SHA-256 不在已适配的新典版本中，未注入。");return false;}
-    opts.build=(int)build; log(L"build="+std::to_wstring(opts.build));
-    // Options travel through the filesystem; the in-game module creates its
-    // own Shared mapping and mutex, so nothing has to be prepared here.
-    WriteLaunchOptionsFile(opts);
-    // Injection goes through the native ptrace injector (freetype first).
-    {
-      std::wstring base=directory(executablePath())+L"\\";
-      std::wstring dll=base+L"thprac_th06nc.dll";
-      if(GetFileAttributesW(dll.c_str())==INVALID_FILE_ATTRIBUTES){CloseHandle(process);failure(L"缺少 thprac_th06nc.dll");return false;}
-      if(!RunLocalInjector(base,dll)){CloseHandle(process);failure(L"注入失败或模块加载失败");return false;}
+    for(int i=0;i<50;++i){
+        length=32768;
+        if(QueryFullProcessImageNameW(process,0,path,&length)){
+            build=identifyBuild(path);
+            if(build!=GameBuild::Unsupported)break;
+        }
+        Sleep(100);
     }
+    if(build==GameBuild::Unsupported){
+        log(std::wstring(L"unsupported: ")+path);
+        CloseHandle(process);failure(L"EXE 的 SHA-256 不在已适配的新典版本中，未注入。");return false;
+    }
+    opts.build=(int)build; log(L"build="+std::to_wstring(opts.build));
     {auto n=mapName(pid); log(std::wstring(L"open map: ")+n);}
     mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());
-    if(!mapping) for(int i=0;i<400&&!mapping;i++){Sleep(50);mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());}
-    if(!mapping) log(L"mapping poll timeout err="+std::to_wstring(GetLastError()));
+    LaunchMapping launch;
+    HANDLE preMap{}, preMutex{};
+    if(!mapping) {
+        preMap=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(Shared),mapName(pid).c_str());
+        preMutex=CreateMutexW(nullptr,FALSE,mutexName(pid).c_str());
+        log(std::wstring(L"preMap=")+std::to_wstring((uintptr_t)preMap)+L" preMutex="+std::to_wstring((uintptr_t)preMutex)+L" err="+std::to_wstring(GetLastError()));
+        launch.create(pid,opts);
+        WriteLaunchOptionsFile(opts);
+
+        std::wstring dll=directory(executablePath())+L"\\thprac_th06nc.dll";
+        if(GetFileAttributesW(dll.c_str())==INVALID_FILE_ATTRIBUTES){
+            CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);
+            failure(L"缺少 thprac_th06nc.dll");return false;
+        }
+        auto load=GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");
+        MEMORY_BASIC_INFORMATION info{};VirtualQuery((void*)load,&info,sizeof(info));
+        std::wstring localOwner=executablePath((HMODULE)info.AllocationBase);
+        size_t sep=localOwner.find_last_of(L"\\/");
+        auto ownerName=sep!=std::wstring::npos?localOwner.substr(sep+1):localOwner;
+        auto remoteOwner=remoteModule(pid,ownerName);
+        for(int i=0;!remoteOwner && i<250;++i){
+            if(WaitForSingleObject(process,20)!=WAIT_TIMEOUT)break;
+            remoteOwner=remoteModule(pid,ownerName);
+        }
+        auto remoteLoad=remoteOwner?remoteOwner+((uintptr_t)load-(uintptr_t)info.AllocationBase):(uintptr_t)load;
+        SIZE_T bytes=(dll.size()+1)*sizeof(wchar_t);
+        void* remote=VirtualAllocEx(process,nullptr,bytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        if(!remote){
+            CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);
+            failure(L"VirtualAllocEx failed: "+std::to_wstring(GetLastError()));return false;
+        }
+        SIZE_T written=0;
+        bool ok=WriteProcessMemory(process,remote,dll.c_str(),bytes,&written)&&written==bytes;
+        if(!ok){
+            VirtualFreeEx(process,remote,0,MEM_RELEASE);CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);
+            failure(L"WriteProcessMemory failed: "+std::to_wstring(GetLastError()));return false;
+        }
+        HANDLE thread=CreateRemoteThread(process,nullptr,0,(LPTHREAD_START_ROUTINE)remoteLoad,remote,0,nullptr);
+        DWORD wait=thread?WaitForSingleObject(thread,15000):WAIT_FAILED;
+        DWORD exitCode=0;if(thread)GetExitCodeThread(thread,&exitCode);
+        if(thread)CloseHandle(thread);
+        if(remote&&wait!=WAIT_TIMEOUT)VirtualFreeEx(process,remote,0,MEM_RELEASE);
+        log(std::wstring(L"inject dll wait=")+std::to_wstring(wait)+L" err="+std::to_wstring(GetLastError())+L" ret="+std::to_wstring((unsigned long long)exitCode));
+        if(wait!=WAIT_OBJECT_0||exitCode==0){
+            CloseHandle(process);if(preMap)CloseHandle(preMap);if(preMutex)CloseHandle(preMutex);
+            failure(L"注入失败或模块加载失败: thprac_th06nc.dll (ret="+std::to_wstring(exitCode)+L")");return false;
+        }
+        if(preMap){mapping=preMap;preMap=nullptr;}
+        if(preMutex){mutex=preMutex;preMutex=nullptr;}
+    }
+    if(!mapping)for(int i=0;i<400&&!mapping;i++){Sleep(50);mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,mapName(pid).c_str());}
+    if(!mapping)log(L"mapping poll timeout err="+std::to_wstring(GetLastError()));
     CloseHandle(process);
     if(!mapping){failure(L"DLL 未建立通信通道。");return false;}
     log(L"mapping opened");
     shared=(Shared*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(Shared));
-    if(!shared) log(L"map view failed err="+std::to_wstring(GetLastError()));
-    if(!mutex){ mutex=OpenMutexW(SYNCHRONIZE|MUTEX_MODIFY_STATE,FALSE,mutexName(pid).c_str());
-      if(!mutex){ log(L"mutex open failed err="+std::to_wstring(GetLastError())); mutex=OpenMutexW(SYNCHRONIZE,FALSE,mutexName(pid).c_str()); }
+    if(!shared)log(L"map view failed err="+std::to_wstring(GetLastError()));
+    if(!mutex){
+        mutex=OpenMutexW(SYNCHRONIZE|MUTEX_MODIFY_STATE,FALSE,mutexName(pid).c_str());
+        if(!mutex){log(L"mutex open failed err="+std::to_wstring(GetLastError()));mutex=OpenMutexW(SYNCHRONIZE,FALSE,mutexName(pid).c_str());}
     }
     if(!shared||!mutex){failure(L"无法打开通信通道。");return false;}
     for(int i=0;i<400&&shared->magic!=Magic;++i)Sleep(25);
@@ -258,6 +298,41 @@ bool startViaCommand() {
     log(L"startViaCommand result="+std::to_wstring(result));
     return result>32;
 }
+bool isProtonContainer() {
+    for (const wchar_t* name : { L"STEAM_COMPAT_DATA_PATH", L"STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                                 L"STEAM_COMPAT_TOOL_PATHS", L"PRESSURE_VESSEL_FILENAMES" }) {
+        wchar_t probe[4] = {};
+        if (GetEnvironmentVariableW(name, probe, 4) > 0) return true;
+    }
+    return false;
+}
+
+bool launchSteamGame() {
+    STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
+    if (isProtonContainer()) {
+        const wchar_t* attempts[] = {
+            L"\"Z:\\bin\\sh\" -c \"steam-runtime-launch-client --alongside-steam -- steam steam://rungameid/4659620\"",
+            L"\"Z:\\bin\\sh\" -c \"steam-runtime-launch-client --alongside-steam -- xdg-open 'steam://rungameid/4659620'\"",
+            L"\"Z:\\bin\\sh\" -c \"xdg-open 'steam://rungameid/4659620'\"",
+        };
+        for (const wchar_t* att : attempts) {
+            std::wstring cmd = att;
+            if (CreateProcessW(L"Z:\\bin\\sh", cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                return true;
+            }
+        }
+    }
+    std::wstring shCmd=L"\"Z:\\bin\\sh\" -c \"steam steam://rungameid/4659620\"";
+    if(CreateProcessW(L"Z:\\bin\\sh",shCmd.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)) {
+        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
+        return true;
+    }
+    if((INT_PTR)ShellExecuteW(nullptr,L"open",L"Z:\\bin\\sh",L"-c \"steam steam://rungameid/4659620\"",nullptr,SW_HIDE)>32) {
+        return true;
+    }
+    return (INT_PTR)ShellExecuteW(nullptr,L"open",L"steam://rungameid/4659620",nullptr,nullptr,SW_SHOWNORMAL)>32;
+}
 }
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
  int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);DWORD pid=0;bool launch=false;
@@ -297,17 +372,21 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
     if(!findGame()) {
       bool started=startViaCommand();
       if(!started) {
-        std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
-        if(fileExists(exe))started=startGame(exe);
-        else log(L"no th06nc.exe at "+exe);
-        if(!started) {
-          if(mayDirectLaunch()) {
-            std::wstring resolved=resolveGameExe();
-            if(resolved.empty())log(L"steam library resolution failed");
-            else started=startGame(resolved);
-          } else log(L"prefix is not the game's own, skip direct launch");
+        if(launchSteamGame()) {
+          started=true;
+        } else {
+          std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
+          if(fileExists(exe))started=startGame(exe);
+          else log(L"no th06nc.exe at "+exe);
+          if(!started) {
+            if(mayDirectLaunch()) {
+              std::wstring resolved=resolveGameExe();
+              if(resolved.empty())log(L"steam library resolution failed");
+              else started=startGame(resolved);
+            } else log(L"prefix is not the game's own, skip direct launch");
+          }
         }
-        if(!started && (INT_PTR)ShellExecuteW(nullptr,L"open",L"steam://rungameid/4659620",nullptr,nullptr,SW_SHOWNORMAL)<=32) {failure(L"无法启动游戏。");return 1;}
+        if(!started) {failure(L"无法启动游戏。");return 1;}
       }
     }
     pid=waitGame(600);
@@ -316,13 +395,17 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
   if(!pid) {
     bool started=startViaCommand();
     if(!started) {
-      std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
-      if(fileExists(exe))started=startGame(exe);
-      else log(L"no th06nc.exe at "+exe);
-      if(!started&&mayDirectLaunch()) {
-        std::wstring resolved=resolveGameExe();
-        if(resolved.empty())log(L"steam library resolution failed");
-        else started=startGame(resolved);
+      if(launchSteamGame()) {
+        started=true;
+      } else {
+        std::wstring exe=directory(executablePath())+L"\\th06nc.exe";
+        if(fileExists(exe))started=startGame(exe);
+        else log(L"no th06nc.exe at "+exe);
+        if(!started&&mayDirectLaunch()) {
+          std::wstring resolved=resolveGameExe();
+          if(resolved.empty())log(L"steam library resolution failed");
+          else started=startGame(resolved);
+        }
       }
     }
     if(started)pid=waitGame(600);
@@ -2682,40 +2765,48 @@ HRESULT STDMETHODCALLTYPE Present(IDXGISwapChain* swap, UINT interval, UINT flag
     }
     bool displayNotice=displayState==DisplayState::Unavailable && GetTickCount64()<displayNoticeUntil;
     if(!PracticeActive()){quickWanted=false;advancedWanted=false;pauseWanted=false;}
+
+    // Pre-initialize ImGui and GUI resources on the first frame of Present()
+    // so when the user opens the practice menu, everything is already loaded in VRAM.
+    if (!guiContext) {
+        DXGI_SWAP_CHAIN_DESC d{};
+        if (SUCCEEDED(swap->GetDesc(&d))) {
+            if (SUCCEEDED(swap->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) {
+                device->GetImmediateContext(&context);
+                guiContext = ImGui::CreateContext();
+                ImGui::GetIO().IniFilename = nullptr;
+                ImGui::StyleColorsDark();
+                Gui::LocaleCreateFont(16.0f);
+                // Segoe UI lacks the official English spell-name corner quotes.
+                // Reuse their Japanese glyphs from the same atlas, retaining each locale's font.
+                auto& fonts=ImGui::GetIO().Fonts->Fonts;
+                for(ImWchar c:{ImWchar(0xff62),ImWchar(0xff63)}) {
+                    if(!fonts[LOCALE_EN_US]->FindGlyphNoFallback(c)) {
+                        if(const auto* glyph=fonts[LOCALE_JA_JP]->FindGlyphNoFallback(c))
+                            fonts[LOCALE_EN_US]->AddGlyph(nullptr,c,glyph->X0,glyph->Y0,glyph->X1,glyph->Y1,
+                                glyph->U0,glyph->V0,glyph->U1,glyph->V1,glyph->AdvanceX);
+                    }
+                }
+                fonts[LOCALE_EN_US]->BuildLookupTable();
+                Gui::LocaleSet(static_cast<Locale>(PracticeLanguage()));
+                Gui::ImplWin32Init(d.OutputWindow);
+                ImGui_ImplDX11_Init(device, context);
+                Gui::InGameInputInit(Gui::INGAGME_INPUT_GEN1,
+                    reinterpret_cast<uintptr_t>(&uiInput), reinterpret_cast<uintptr_t>(&uiPrevious),
+                    reinterpret_cast<uintptr_t>(&uiRepeat));
+                practice = std::make_unique<THGuiPrac>();
+                overlay = std::make_unique<THOverlay>();
+                advanced = std::make_unique<THAdvanced>();
+                pause = std::make_unique<THPauseMenu>();
+            }
+        }
+    }
+
     if (!wanted && !opened && !quickWanted && !advancedWanted && !pauseWanted && !inputHooked && !displayNotice) return PresentFrame(swap, interval, flags);
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swap->GetDesc(&desc))) return PresentFrame(swap, interval, flags);
     auto previousContext = ImGui::GetCurrentContext();
-    if (!guiContext) {
-        if (FAILED(swap->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device))))
-            return PresentFrame(swap, interval, flags);
-        device->GetImmediateContext(&context);
-        guiContext = ImGui::CreateContext();
-        ImGui::GetIO().IniFilename = nullptr;
-        ImGui::StyleColorsDark();
-        Gui::LocaleCreateFont(16.0f);
-        // Segoe UI lacks the official English spell-name corner quotes.
-        // Reuse their Japanese glyphs from the same atlas, retaining each locale's font.
-        auto& fonts=ImGui::GetIO().Fonts->Fonts;
-        for(ImWchar c:{ImWchar(0xff62),ImWchar(0xff63)}) {
-            if(!fonts[LOCALE_EN_US]->FindGlyphNoFallback(c)) {
-                if(const auto* glyph=fonts[LOCALE_JA_JP]->FindGlyphNoFallback(c))
-                    fonts[LOCALE_EN_US]->AddGlyph(nullptr,c,glyph->X0,glyph->Y0,glyph->X1,glyph->Y1,
-                        glyph->U0,glyph->V0,glyph->U1,glyph->V1,glyph->AdvanceX);
-            }
-        }
-        fonts[LOCALE_EN_US]->BuildLookupTable();
-        Gui::LocaleSet(static_cast<Locale>(PracticeLanguage()));
-        Gui::ImplWin32Init(desc.OutputWindow);
-        ImGui_ImplDX11_Init(device, context);
-        Gui::InGameInputInit(Gui::INGAGME_INPUT_GEN1,
-            reinterpret_cast<uintptr_t>(&uiInput), reinterpret_cast<uintptr_t>(&uiPrevious),
-            reinterpret_cast<uintptr_t>(&uiRepeat));
-        practice = std::make_unique<THGuiPrac>();
-        overlay = std::make_unique<THOverlay>();
-        advanced = std::make_unique<THAdvanced>();
-        pause = std::make_unique<THPauseMenu>();
-    }
+    if (!guiContext) return PresentFrame(swap, interval, flags);
     ImGui::SetCurrentContext(guiContext);
     auto language=static_cast<Locale>(PracticeLanguage());
     if(Gui::LocaleGet()!=language)Gui::LocaleSet(language);
@@ -2875,7 +2966,7 @@ HRESULT WINAPI HookedCreateDevice(IDXGIAdapter* a, D3D_DRIVER_TYPE b, HMODULE c,
 // of the DXGI implementation, so hooking it through a throwaway swap chain also
 // covers the game's own.
 bool InstallPresentHookFromDummy() {
-    DiagLog("overlay: fallback dummy swap chain");
+    DiagLog("overlay: dummy swap chain");
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc=DefWindowProcW; wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"ThpracNcDummyWindow";
     RegisterClassExW(&wc);
@@ -2887,8 +2978,10 @@ bool InstallPresentHookFromDummy() {
     sd.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow=hwnd; sd.SampleDesc.Count=1; sd.Windowed=TRUE; sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
     IDXGISwapChain* swap{}; ID3D11Device* dev{}; ID3D11DeviceContext* ctx{}; D3D_FEATURE_LEVEL level{};
-    // Call the trampoline so HookedCreateDevice is not re-entered.
     HRESULT hr=originalCreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&sd,&swap,&dev,&level,&ctx);
+    if(FAILED(hr)) {
+        hr=originalCreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&sd,&swap,&dev,&level,&ctx);
+    }
     char buf[64]; snprintf(buf,sizeof(buf),"overlay: dummy create device hr=0x%08lx",(unsigned long)hr); DiagLog(buf);
     bool ok=false;
     if(SUCCEEDED(hr)&&swap){TryInstallPresentHook(swap);ok=overlayInstalled;}
@@ -2896,6 +2989,7 @@ bool InstallPresentHookFromDummy() {
     if(ctx)ctx->Release();
     if(dev)dev->Release();
     DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
     return ok;
 }
 bool InstallOverlay(bool lowLatency)
@@ -2903,20 +2997,54 @@ bool InstallOverlay(bool lowLatency)
     DiagLog("overlay: begin");
     overlayLowLatency = lowLatency;
     HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
-    for(int i=0;i<600 && !d3d11;i++){Sleep(50); d3d11=GetModuleHandleW(L"d3d11.dll");}
+    if (!d3d11) d3d11 = LoadLibraryW(L"d3d11.dll");
+    for(int i=0;i<100 && !d3d11;i++){Sleep(20); d3d11=GetModuleHandleW(L"d3d11.dll");}
     if (!d3d11) { DiagLog("overlay: d3d11 not loaded"); return false; }
     DiagLog("overlay: d3d11 loaded");
     auto proc = GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain");
     if (!proc) { DiagLog("overlay: no proc"); return false; }
+    originalCreateDevice = reinterpret_cast<CreateDeviceFn>(proc);
+
+    // 1. If game already has its swap chain, hook it directly
+    if (Rva::SwapChain) {
+        auto existingSwap = *reinterpret_cast<IDXGISwapChain**>(imageBase + Rva::SwapChain);
+        if (existingSwap) {
+            TryInstallPresentHook(existingSwap);
+            if (overlayInstalled) {
+                DiagLog("overlay: hooked directly from game SwapChain");
+                return true;
+            }
+        }
+    }
+
+    // 2. Install Present hook immediately using dummy swap chain (no 3s delay)
+    if (InstallPresentHookFromDummy()) {
+        DiagLog("overlay: hooked via dummy swapchain");
+        return true;
+    }
+
+    // 3. Fallback: hook D3D11CreateDeviceAndSwapChain if not hooked yet
     MH_STATUS st=MH_CreateHook(reinterpret_cast<void*>(proc), reinterpret_cast<void*>(HookedCreateDevice), reinterpret_cast<void**>(&originalCreateDevice));
-    if (st != MH_OK) { char buf[64]; snprintf(buf,sizeof(buf),"overlay: createhook fail %d",st); DiagLog(buf); return false; }
-    st=MH_EnableHook(reinterpret_cast<void*>(proc));
-    if (st != MH_OK) { char buf[64]; snprintf(buf,sizeof(buf),"overlay: enable fail %d",st); DiagLog(buf); return false; }
-    DiagLog("overlay: hooked create");
-    // Give the game time to call the hooked function itself; if it did not, hook Present directly.
-    for(int i=0;i<60 && !overlayInstalled;++i)Sleep(50);
-    if(!overlayInstalled)InstallPresentHookFromDummy();
-    return true;
+    if (st == MH_OK) {
+        MH_EnableHook(reinterpret_cast<void*>(proc));
+        DiagLog("overlay: hooked create");
+    }
+
+    // 4. Quick retry loop for startup races (up to 1s in 20ms steps, breaking out immediately)
+    for(int i=0;i<50 && !overlayInstalled;++i) {
+        Sleep(20);
+        if (Rva::SwapChain) {
+            auto swap = *reinterpret_cast<IDXGISwapChain**>(imageBase + Rva::SwapChain);
+            if (swap) {
+                TryInstallPresentHook(swap);
+                if (overlayInstalled) break;
+            }
+        }
+        if (!overlayInstalled) {
+            InstallPresentHookFromDummy();
+        }
+    }
+    return overlayInstalled;
 }
 }
 // ---- Practice runtime (th06nc/runtime.cpp) ----

@@ -13,6 +13,17 @@ void* GetNtDataDirectory(HMODULE hMod, BYTE directory);
 
 
 
+// DO NOT CHANGE THIS STRUCT WITHOUT RECOMPILING init_shellcode.cpp
+struct alignas(16) remote_param {
+    UINT_PTR pRemoteParamAddr;
+    decltype(LoadLibraryW)* pLoadLibraryW;
+    decltype(LoadLibraryA)* pLoadLibraryA;
+    decltype(VirtualProtect)* pVirtualProtect;
+    decltype(GetProcAddress)* pGetProcAddress;
+    wchar_t sExePath[MAX_PATH];
+    char sLoadErrDllName[MAX_PATH];
+};
+
 enum RunFlags {
     RUN_FLAG_THPRAC = 1 << 0,
     RUN_FLAG_SKIP_IDENTIFY = 1 << 1,
@@ -26,7 +37,12 @@ const THGameVersion* CheckOngoingGameByPID(DWORD pid, uintptr_t* base, HANDLE* p
 bool CheckIfAnyGame();
 const wchar_t* GetGameMutexName(THGameID game);
 bool CheckTHPracSig(HANDLE hProc, uintptr_t base);
-bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID id = ID_UNKNOWN);
+bool WriteTHPracSig(HANDLE hProc, uintptr_t base);
+bool LoadSelf(HANDLE hProcess);
+uintptr_t LoadRemoteLibrary(HANDLE hProcess, const wchar_t* libName);
+bool TryLoadVpatch(HANDLE hProcess, const wchar_t* exeDir);
+bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID id = ID_UNKNOWN,
+    const char* steamAppId = nullptr);
 std::string PrimaryExeNameForGame(THGameID id);
 bool ApplyToProcById(DWORD pid);
 bool RunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags = 0xFFFFFFFF);

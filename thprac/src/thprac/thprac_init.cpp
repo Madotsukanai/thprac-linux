@@ -81,7 +81,21 @@ RUN_GAME_STATUS TryRunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flag
         }
     }
 
-    if (knownGame.ver->gameId == ID_TH06NC) return LaunchTH06NC((flags & RUN_FLAG_THPRAC) != 0) ? RUN_GAME_SUCCESS : RUN_GAME_FAILURE;
+    if (knownGame.ver->gameId == ID_TH06NC) {
+        if (!RunLaunchCommand(L"steam steam://rungameid/4659620")) {
+            ShellExecuteW(NULL, L"open", L"steam://rungameid/4659620", nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        if (!(flags & RUN_FLAG_THPRAC)) {
+            return RUN_GAME_SUCCESS;
+        }
+        for (int i = 0; i < 600; ++i) {
+            Sleep(100);
+            if (FindAndAttach(false, false, ID_TH06NC)) {
+                return RUN_GAME_SUCCESS;
+            }
+        }
+        return RUN_GAME_FAILURE;
+    }
     auto* ver = knownGame.ver;
     if (!ver->has_oilp) {
         flags &= ~RUN_FLAG_OILP;
@@ -352,6 +366,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
 
     if (curCmdId == CMD_ATTACH) {
         // Exit code tells the cross-prefix helper (thprac_wine_attach.cpp) whether a game was handled.
+        // THPRAC_ATTACH_WAIT=<seconds> keeps polling for a game to appear instead
+        // of giving up at once; the cross-container dispatch starts this helper
+        // before the game has finished launching.
+        wchar_t waitBuf[16] = {};
+        int waitSecs = 0;
+        if (GetEnvironmentVariableW(L"THPRAC_ATTACH_WAIT", waitBuf, 16) > 0) {
+            waitSecs = _wtoi(waitBuf);
+        }
+        if (waitSecs > 0) {
+            for (int i = 0; i < waitSecs * 5; ++i) {
+                if (FindAndAttach(false, false)) {
+                    return 0;
+                }
+                Sleep(200);
+            }
+            return 1;
+        }
         return FindAndAttach(false, false) ? 0 : 1;
     }
     else if (!gSettings.dont_search_ongoing_game && FindAndAttach(false, true)) {
