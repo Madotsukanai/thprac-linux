@@ -7,6 +7,7 @@
 #include "thprac_gui_locale.h"
 #include "thprac_utils.h"
 #include "thprac_native.h"
+#include "thprac_load_exe.h"
 
 #include <windows.h>
 
@@ -150,7 +151,7 @@ struct ScriptResult {
 };
 
 bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, ScriptResult& result,
-    const std::string& extraVars = std::string()) {
+    const std::string& extraVars = std::string(), const std::string& patchArgs = std::string()) {
     (void)extraVars;
     std::wstring dir = LogDirectory();
     if (dir.empty()) {
@@ -195,6 +196,7 @@ bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, Scrip
         + L"\" \"" + utf8_to_utf16(outU.c_str()) + L"\" \"" + utf8_to_utf16(logU.c_str())
         + L"\" \"" + utf8_to_utf16(selfU.c_str()) + L"\" "
         + std::to_wstring(target) + L" " + (needNs ? L"1" : L"0")
+        + (patchArgs.empty() ? L"" : L" " + utf8_to_utf16(patchArgs.c_str()))
         + (extraVars.find("HOST_DISPATCH=1") != std::string::npos ? L" --host" : L"");
     DebugLog("cmd: " + utf16_to_utf8(cmd.c_str()));
 
@@ -375,7 +377,8 @@ static int TryInnerAppAttach(THGameID wanted, bool prompt, const char* steamAppI
     return status;
 }
 
-static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId) {
+static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId,
+    uint32_t patchFlags = 0) {
     // FindAndAttach is polled every frame while waiting for a launched game.
     ULONGLONG now = GetTickCount64();
     if (!manual && g_lastScan && now - g_lastScan < 3000) {
@@ -438,7 +441,10 @@ static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, b
 
         DebugLog("applying to " + c.name + " (pid " + std::to_string(c.pid) + ") in Wine prefix " + prefix + (c.otherNs ? " [other namespace]" : ""));
         ScriptResult apply;
-        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply, extraVars);
+        std::string patchArgs;
+        if (patchFlags & RUN_FLAG_VPATCH) patchArgs += " --vpatch";
+        if (patchFlags & RUN_FLAG_OILP) patchArgs += " --oilp";
+        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply, extraVars, patchArgs);
 
         bool success = false;
         for (const auto& line : SplitLines(apply.out)) {
@@ -467,16 +473,18 @@ static std::atomic<bool> g_asyncSuccess = false;
 struct AsyncScanArgs {
     THGameID wanted;
     std::string steamAppId;
+    uint32_t patchFlags = 0;
 };
 
 static DWORD WINAPI AsyncAttachThread(LPVOID param) {
     auto* args = static_cast<AsyncScanArgs*>(param);
     THGameID wanted = args->wanted;
     std::string steamAppId = args->steamAppId;
+    uint32_t patchFlags = args->patchFlags;
     delete args;
 
     bool dummyPrompted = false;
-    bool success = AttachOtherPrefixesSync(wanted, false, false, &dummyPrompted, steamAppId.c_str());
+    bool success = AttachOtherPrefixesSync(wanted, false, false, &dummyPrompted, steamAppId.c_str(), patchFlags);
     if (success) {
         g_asyncSuccess.store(true, std::memory_order_release);
     }
@@ -484,7 +492,8 @@ static DWORD WINAPI AsyncAttachThread(LPVOID param) {
     return 0;
 }
 
-bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId) {
+bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId,
+    uint32_t patchFlags) {
     if (!IsWine()) {
         DebugLog("skip: not running under Wine", true);
         return false;
@@ -508,7 +517,7 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
             return false;
         }
         g_asyncRunning.store(true, std::memory_order_release);
-        auto* args = new AsyncScanArgs{ wanted, steamAppId ? steamAppId : "" };
+        auto* args = new AsyncScanArgs{ wanted, steamAppId ? steamAppId : "", patchFlags };
         HANDLE hThread = CreateThread(nullptr, 0, AsyncAttachThread, args, 0, nullptr);
         if (hThread) {
             CloseHandle(hThread);
@@ -519,7 +528,7 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
         return false;
     }
 
-    return AttachOtherPrefixesSync(wanted, manual, prompt, prompted, steamAppId);
+    return AttachOtherPrefixesSync(wanted, manual, prompt, prompted, steamAppId, patchFlags);
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +552,7 @@ struct WatchState {
 struct WatchArgs {
     THGameID wanted;
     std::string appId;
+    uint32_t patchFlags = 0;
     WatchState* state;
 };
 static std::atomic<int> g_watchActive{ 0 };
@@ -592,7 +602,7 @@ bool WatchOngoingGame(THGameID wanted, const std::string& appId) {
         return false;
     }
 
-    auto* args = new WatchArgs{ wanted, appId, state };
+    auto* args = new WatchArgs{ wanted, appId, 0, state };
     HANDLE hThread = CreateThread(nullptr, 0, WatchThread, args, 0, nullptr);
     if (hThread) {
         CloseHandle(hThread);
@@ -607,6 +617,34 @@ bool WatchOngoingGame(THGameID wanted, const std::string& appId) {
 
 bool WatchOngoingNcGame() {
     return WatchOngoingGame(ID_TH06NC, "4659620");
+}
+
+bool KillGameProcess(const std::string& exeNameUtf8) {
+    std::wstring helper;
+    if (!THPrac::NativeBundle::XAttachPath(helper)) return false;
+    std::string hex = THPrac::NativeBundle::HexEncode(utf8_to_utf16(exeNameUtf8.c_str()));
+    std::wstring hexW;
+    for (char c : hex) hexW.push_back(wchar_t((unsigned char)c));
+    std::string helperU = ToUnixPath(helper);
+    std::wstring helperDos = ToDosPath(helperU);
+    std::wstring logPath = LogPath(L"thprac_kill.log");
+    std::string logUnix = ToUnixPath(logPath);
+    std::wstring logWide(logUnix.begin(), logUnix.end());
+    std::wstring cmd = L"\"" + helperDos + L"\" kill " + hexW + L" \"" + logWide + L"\"";
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(helperDos.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi)) {
+        DebugLog("KillGameProcess create failed err=" + std::to_string(GetLastError()), true);
+        return false;
+    }
+    DWORD rc = 1;
+    WaitForSingleObject(pi.hProcess, 15000);
+    GetExitCodeProcess(pi.hProcess, &rc);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    DebugLog("KillGameProcess rc=" + std::to_string(rc), true);
+    return rc == 0;
 }
 
 }

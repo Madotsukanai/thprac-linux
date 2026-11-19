@@ -150,7 +150,15 @@ void LauncherToolsMain(LauncherState* state) {
 
     ImGui::SetCursorPos({ btnPosX,  height + step * 0 });
     if (ImGui::Button(S(THPRAC_TOOLS_APPLY_THPRAC), buttonSize)) {
-        FindAndAttach(true, true);
+        // During a pending launch, do not prompt for a game that just appeared:
+        // the user already asked to launch it. Outside of a launch, keep the
+        // confirmation dialog.
+        bool pending = state->reflectiveLaunchID != ID_UNKNOWN;
+        FindAndAttach(!pending, !pending, ID_UNKNOWN,
+            pending && !state->reflectiveAppId.empty() ? state->reflectiveAppId.c_str() : nullptr,
+            pending ? state->reflectivePatchFlags | RUN_FLAG_THPRAC : 0,
+            nullptr,
+            pending && !state->reflectiveExeName.empty() ? utf8_to_utf16(state->reflectiveExeName.c_str()).c_str() : nullptr);
     }
     ImGui::SetCursorPos({ btnPosX,  height + step * 1 });
     if (ImGui::Button(S(THPRAC_TOOLS_RND_GAME), buttonSize)) {
@@ -412,13 +420,49 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
     }
     ImGui::EndTabBar();
 
-    if (state->reflectiveLaunchID && FindAndAttach(false, false, state->reflectiveLaunchID,
+    if (state->reflectiveLaunchID) {
+        // Track the launched game process. FindAndAttach reports its PID once
+        // the process appears; if that process later exits, stop waiting.
+        DWORD foundPid = 0;
+        bool attached = FindAndAttach(false, false, state->reflectiveLaunchID,
             state->reflectiveAppId.empty() ? nullptr : state->reflectiveAppId.c_str(),
-            state->reflectivePatchFlags | RUN_FLAG_THPRAC)) {
-        state->reflectiveLaunchID = ID_UNKNOWN;
-        state->reflectiveLaunchStart = 0;
-        state->reflectiveAppId.clear();
-        state->reflectivePatchFlags = 0;
+            state->reflectivePatchFlags | RUN_FLAG_THPRAC, &foundPid,
+            state->reflectiveExeName.empty() ? nullptr : utf8_to_utf16(state->reflectiveExeName.c_str()).c_str());
+        if (attached) {
+            state->reflectiveLaunchID = ID_UNKNOWN;
+            state->reflectiveLaunchStart = 0;
+            state->reflectiveAppId.clear();
+            state->reflectivePatchFlags = 0;
+        state->reflectiveExeName.clear();
+            state->reflectiveGamePid = 0;
+            state->reflectiveGameExited = false;
+        } else {
+            if (foundPid) state->reflectiveGamePid = foundPid;
+            if (state->reflectiveGamePid) {
+                HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, state->reflectiveGamePid);
+                if (!h) {
+                    // Process no longer exists -> it exited.
+                    state->reflectiveGameExited = true;
+                } else {
+                    DWORD code = 0;
+                    if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0 ||
+                        (GetExitCodeProcess(h, &code) && code != STILL_ACTIVE)) {
+                        state->reflectiveGameExited = true;
+                    }
+                    CloseHandle(h);
+                }
+            }
+            if (state->reflectiveGameExited) {
+                state->reflectiveLaunchID = ID_UNKNOWN;
+                state->reflectiveLaunchStart = 0;
+                state->reflectiveAppId.clear();
+                state->reflectivePatchFlags = 0;
+        state->reflectiveExeName.clear();
+                state->reflectiveGamePid = 0;
+                state->reflectiveGameExited = false;
+                state->closeAfterLaunch = false;
+            }
+        }
     }
     // If the game never becomes attachable (launch failed, was cancelled, or
     // no thprac-compatible process appears), stop waiting after a timeout so
@@ -429,6 +473,7 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
         state->reflectiveLaunchStart = 0;
         state->reflectiveAppId.clear();
         state->reflectivePatchFlags = 0;
+        state->reflectiveExeName.clear();
         state->closeAfterLaunch = false;
     }
     // A game started outside the launcher (e.g. "steam steam://rungameid/..."

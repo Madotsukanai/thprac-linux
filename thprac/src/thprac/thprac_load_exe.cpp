@@ -320,6 +320,195 @@ bool LoadSelf(HANDLE hProcess) {
 }
 
 
+// Read a whole file (UTF-8/ASCII VDF text) up to 8 MiB.
+static bool ReadSmallFile(const std::wstring& path, std::string& out) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart <= 8 * 1024 * 1024;
+    if (ok) {
+        out.resize((size_t)size.QuadPart);
+        DWORD got = 0;
+        ok = ReadFile(f, out.data(), (DWORD)out.size(), &got, nullptr) && got == out.size();
+    }
+    CloseHandle(f);
+    return ok;
+}
+static std::string VdfString(const std::string& text, const char* key, size_t from = 0) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t at = text.find(needle, from);
+    if (at == std::string::npos) return {};
+    size_t q = text.find('"', at + needle.size());
+    if (q == std::string::npos) return {};
+    size_t e = text.find('"', q + 1);
+    if (e == std::string::npos || e == q + 1) return {};
+    return text.substr(q + 1, e - q - 1);
+}
+
+// Parse a Steam shortcuts.vdf binary file. Each shortcut stores a 32-bit
+// appid (little endian) and an "Exe" string with the launch path.
+static std::string ShortcutExeForAppId(const std::string& vdf, uint32_t appid) {
+    size_t pos = 0;
+    while (pos < vdf.size()) {
+        // Find the "appid" key followed by a 4-byte integer.
+        size_t key = vdf.find("\x02appid\x00", pos, 8);
+        if (key == std::string::npos) break;
+        size_t val = key + 8;
+        if (val + 4 > vdf.size()) break;
+        uint32_t id = (uint8_t)vdf[val] | ((uint8_t)vdf[val + 1] << 8) |
+                      ((uint8_t)vdf[val + 2] << 16) | ((uint8_t)vdf[val + 3] << 24);
+        // Find the "Exe" key following this appid within the same shortcut.
+        size_t exeKey = vdf.find("\x01Exe\x00", val + 4, 6);
+        if (exeKey == std::string::npos) break;
+        size_t exeStart = exeKey + 6;
+        size_t exeEnd = vdf.find('\0', exeStart);
+        if (exeEnd == std::string::npos) break;
+        if (id == appid) {
+            std::string path = vdf.substr(exeStart, exeEnd - exeStart);
+            // Remove surrounding quotes.
+            if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
+                path = path.substr(1, path.size() - 2);
+            return path;
+        }
+        pos = exeEnd + 1;
+    }
+    return {};
+}
+
+std::string SteamAppExeName(const std::string& command) {
+    // Extract the numeric GameID from a steam://rungameid/<id> launch command.
+    size_t at = command.find("rungameid/");
+    if (at == std::string::npos) return {};
+    at += 10;
+    size_t end = at;
+    while (end < command.size() && command[end] >= '0' && command[end] <= '9') ++end;
+    if (end == at) return {};
+    unsigned long long gameId = strtoull(command.substr(at, end - at).c_str(), nullptr, 10);
+    // Steam shortcut GameIDs are 64-bit. Typically GameID = appid | (0x02000000 << 32),
+    // so the appid is the HIGH 32 bits. Some tools put it in the low half, so
+    // try both when searching shortcuts.vdf below.
+    uint32_t appidHigh = (uint32_t)(gameId >> 32);
+    uint32_t appidLow = (uint32_t)(gameId & 0xFFFFFFFFull);
+
+    // Steam's user data root lives under the real $HOME.
+    wchar_t home[MAX_PATH] = {};
+    std::wstring base;
+    if (GetEnvironmentVariableW(L"HOME", home, MAX_PATH) && home[0] == L'/') {
+        base = std::wstring(L"Z:") + home;
+        for (wchar_t& c : base) if (c == L'/') c = L'\\';
+    } else if (GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH)) {
+        base = home;
+    }
+    if (base.empty()) return {};
+
+    // Search every user's shortcuts.vdf.
+    std::wstring userDir = base + L"\\.local\\share\\Steam\\userdata";
+    WIN32_FIND_DATAW fd{};
+    HANDLE hFind = FindFirstFileW((userDir + L"\\*").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        userDir = base + L"\\.steam\\steam\\userdata";
+        hFind = FindFirstFileW((userDir + L"\\*").c_str(), &fd);
+    }
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            std::wstring shortcuts = userDir + L"\\" + fd.cFileName + L"\\config\\shortcuts.vdf";
+            std::string text;
+            if (!ReadSmallFile(shortcuts, text)) continue;
+            std::string exePath = ShortcutExeForAppId(text, appidHigh);
+            if (exePath.empty() && appidLow != appidHigh) exePath = ShortcutExeForAppId(text, appidLow);
+            if (exePath.empty()) continue;
+            // Return just the executable file name (UTF-8).
+            size_t slash = exePath.find_last_of("/\\");
+            return slash == std::string::npos ? exePath : exePath.substr(slash + 1);
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+
+    // Fall back to installed (non-shortcut) games via appmanifest.
+    std::vector<std::wstring> libraries;
+    std::wstring vdfPath = base + L"\\.local\\share\\Steam\\steamapps\\libraryfolders.vdf";
+    std::string vdf;
+    if (ReadSmallFile(vdfPath, vdf)) {
+        size_t pos = 0;
+        while ((pos = vdf.find("\"path\"", pos)) != std::string::npos) {
+            std::string p = VdfString(vdf, "path", pos);
+            if (!p.empty()) {
+                std::wstring wp(p.begin(), p.end());
+                libraries.push_back(wp + L"\\steamapps");
+            }
+            pos += 6;
+        }
+    }
+    libraries.push_back(base + L"\\.local\\share\\Steam\\steamapps");
+    libraries.push_back(base + L"\\.steam\\steam\\steamapps");
+    std::wstring idw = std::to_wstring(appidHigh);
+    for (const auto& lib : libraries) {
+        std::wstring manifest = lib + L"\\appmanifest_" + idw + L".acf";
+        std::string acf;
+        if (!ReadSmallFile(manifest, acf)) continue;
+        std::string installdir = VdfString(acf, "installdir");
+        if (installdir.empty()) continue;
+        std::wstring dir = lib + L"\\common\\" + std::wstring(installdir.begin(), installdir.end());
+        WIN32_FIND_DATAW f{};
+        HANDLE h = FindFirstFileW((dir + L"\\*.exe").c_str(), &f);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (f.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (ParseExeName(f.cFileName, wcslen(f.cFileName)) == ID_UNKNOWN) continue;
+            std::wstring name(f.cFileName);
+            std::string utf8;
+            int n = WideCharToMultiByte(CP_UTF8, 0, name.c_str(), (int)name.size(), nullptr, 0, nullptr, nullptr);
+            utf8.resize(n > 0 ? (size_t)n : 0);
+            if (n > 0) WideCharToMultiByte(CP_UTF8, 0, name.c_str(), (int)name.size(), utf8.data(), n, nullptr, nullptr);
+            FindClose(h);
+            return utf8;
+        } while (FindNextFileW(h, &f));
+        FindClose(h);
+    }
+    return {};
+}
+
+std::string PrimaryExeNameForGame(THGameID id) {
+    // Returns the exe-name stem used by Wine processes for a game. Steam
+    // launch commands do not contain an exe path, so the abort button needs
+    // this to find and terminate a cross-prefix game process.
+    switch (id) {
+        case ID_ALCOSTG: return "alcostg";
+        case ID_TH06:    return "th06";
+        case ID_TH06NC:  return "th06nc";
+        case ID_TH07:    return "th07";
+        case ID_TH075:   return "th075";
+        case ID_TH08:    return "th08";
+        case ID_TH09:    return "th09";
+        case ID_TH095:   return "th095";
+        case ID_TH10:    return "th10";
+        case ID_TH105:   return "th105";
+        case ID_TH11:    return "th11";
+        case ID_TH12:    return "th12";
+        case ID_TH123:   return "th123";
+        case ID_TH125:   return "th125";
+        case ID_TH128:   return "th128";
+        case ID_TH13:    return "th13";
+        case ID_TH135:   return "th135";
+        case ID_TH14:    return "th14";
+        case ID_TH143:   return "th143";
+        case ID_TH145:   return "th145";
+        case ID_TH15:    return "th15";
+        case ID_TH155:   return "th155";
+        case ID_TH16:    return "th16";
+        case ID_TH165:   return "th165";
+        case ID_TH17:    return "th17";
+        case ID_TH175:   return "th175";
+        case ID_TH18:    return "th18";
+        case ID_TH185:   return "th185";
+        case ID_TH19:    return "th19";
+        case ID_TH20:    return "th20";
+        default: return {};
+    }
+}
+
 bool ApplyToProcById(DWORD pid) {
     uintptr_t base = 0;
     HANDLE hProc = nullptr;
@@ -365,10 +554,28 @@ static void InjectPatchesIntoProcess(HANDLE hProc, uint32_t patchFlags) {
     AttachLog("inject patches flags=%u ok=%d", (unsigned)patchFlags, injected ? 1 : 0);
 }
 
-bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gameID, const char* steamAppId, uint32_t patchFlags) {
+bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gameID, const char* steamAppId, uint32_t patchFlags, DWORD* outPid, const wchar_t* requiredExeName) {
     AttachLog("FindAndAttach(no=%d yes=%d game=%d)", prompt_if_no_game?1:0, prompt_if_yes_game?1:0, (int)gameID);
     bool hasPrompted = false;
     auto TryProcess = [&](SYSTEM_PROCESS_INFORMATION* proc, THGameID requiredGameID) -> bool {
+        // Never treat our own launcher process as the game. Without this the
+        // launcher can be misidentified (e.g. as TH06) and patches get injected
+        // into ourselves instead of the real game in another container.
+        if (proc->UniqueProcessId == GetCurrentProcessId()) return false;
+        // When the launcher knows the exact executable it started (from the
+        // Steam app manifest), ignore same-named processes in our own prefix
+        // and only attach to a process with that exact image name.
+        if (requiredExeName && *requiredExeName) {
+            const wchar_t* imgBuf = proc->ImageName.Buffer;
+            size_t imgLen = proc->ImageName.Length / sizeof(wchar_t);
+            if (!imgBuf || !imgLen) return false;
+            const wchar_t* image = imgBuf;
+            size_t imageLen = imgLen;
+            const wchar_t* slash = nullptr;
+            for (size_t i = 0; i < imageLen; ++i) if (image[i] == L'\\' || image[i] == L'/') slash = image + i;
+            if (slash) { image = slash + 1; imageLen -= size_t(slash + 1 - imgBuf); }
+            if (!t_str_compare_nocase(image, imageLen, requiredExeName, t_strlen(requiredExeName))) return false;
+        }
         uintptr_t base;
         HANDLE hProc = NULL;
         const THGameVersion* gameSig = CheckOngoingGameByPID(proc->UniqueProcessId, &base, &hProc);
@@ -383,6 +590,7 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
             return false;
         }
         AttachLog("found pid=%lu game=%d nc=%d prompt=%d", (unsigned long)proc->UniqueProcessId, (int)gameSig->gameId, gameSig->gameId == ID_TH06NC, prompt_if_yes_game ? 1 : 0);
+        if (outPid) *outPid = proc->UniqueProcessId;
         if (prompt_if_yes_game) {
             hasPrompted = true;
             const char* title = gameSig->gameId == ID_TH06NC ? S(TH06NC_TITLE) : gThGameStrs[gameSig->gameId];
@@ -593,6 +801,7 @@ std::wstring ResolveGamePath(const wchar_t* path) {
 }
 
 bool RunGame(const wchar_t* exeFnParam, wchar_t* cmdLine, uint32_t flags) {
+    AttachLog("RunGame exe=%ls flags=%u", exeFnParam, (unsigned)flags);
     STARTUPINFOW si = {
         .cb = sizeof(si),
     };

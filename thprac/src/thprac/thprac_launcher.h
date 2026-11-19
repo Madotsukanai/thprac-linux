@@ -202,6 +202,9 @@ struct LauncherState {
     // the game's own container (see WineAttach::AttachOtherPrefixes).
     std::string reflectiveAppId;
     uint32_t reflectivePatchFlags = 0; // RUN_FLAG_OILP / RUN_FLAG_VPATCH for the pending launch
+    DWORD reflectiveGamePid = 0;        // PID of the launched game process (0 = not started yet)
+    bool reflectiveGameExited = false;  // set when the launched process has exited
+    std::string reflectiveExeName;      // resolved executable name from the Steam launch command
     LauncherThcrapSelection thcrapSel;
 
     th_glossary_t thcrapError = A0000ERROR_C;

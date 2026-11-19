@@ -42,8 +42,13 @@ bool LoadSelf(HANDLE hProcess);
 uintptr_t LoadRemoteLibrary(HANDLE hProcess, const wchar_t* libName);
 bool TryLoadVpatch(HANDLE hProcess, const wchar_t* exeDir);
 bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID id = ID_UNKNOWN,
-    const char* steamAppId = nullptr, uint32_t patchFlags = 0);
+    const char* steamAppId = nullptr, uint32_t patchFlags = 0, DWORD* outPid = nullptr,
+    const wchar_t* requiredExeName = nullptr);
 std::string PrimaryExeNameForGame(THGameID id);
+// Resolve the actual game executable name from a Steam launch command
+// ("steam steam://rungameid/<appid>") by reading the Steam library metadata.
+// Returns e.g. "東方紅魔郷.exe" or "th06nc.exe"; empty when not resolvable.
+std::string SteamAppExeName(const std::string& command);
 bool ApplyToProcById(DWORD pid);
 bool RunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags = 0xFFFFFFFF);
 bool CheckDLLFunction(const wchar_t* path, const char* funcName);

@@ -29,7 +29,7 @@ bool IsWine();
 //                into the game's own container, which is the only way to reach
 //                it from inside another pressure-vessel sandbox.
 bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted,
-    const char* steamAppId = nullptr);
+    const char* steamAppId = nullptr, uint32_t patchFlags = 0);
 
 // Keep a background attach helper resident inside the Steam container of the
 // given game so that it gets thprac applied even when it was started outside
@@ -45,6 +45,11 @@ bool WatchOngoingGame(THGameID wanted, const std::string& appId);
 // Same as WatchOngoingGame for th06nc, whose Steam container is known even
 // without a launcher-configured instance.
 bool WatchOngoingNcGame();
+
+// Terminate a running game process by executable name across Wine prefixes
+// (used by the launcher's "abort launch" button). Returns true if a process
+// was matched and signalled.
+bool KillGameProcess(const std::string& exeNameUtf8);
 
 // Launcher game paths are stored as Linux paths so that they stay valid in every
 // Wine prefix (a C:\users\<name>\... path only exists in the prefix it came from).

@@ -55,6 +55,13 @@ enum RUN_GAME_STATUS {
 };
 
 RUN_GAME_STATUS TryRunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags, bool prompt, bool warn_unknown_exe) {
+    // The launcher has already identified the game and set up the launch
+    // (including patches). Skip re-identification and the TYPE_STEAM special
+    // path, which would launch a second copy via ShellExecute and cause the
+    // game's double-launch error.
+    if (flags != 0xFFFFFFFF && (flags & RUN_FLAG_SKIP_IDENTIFY)) {
+        return RunGame(exeFn, cmdLine, flags) ? RUN_GAME_SUCCESS : RUN_GAME_FAILURE;
+    }
     size_t exeLen = t_strlen(exeFn);
     if (_wcsnicmp(exeFn + exeLen - 4, L".exe", 4) != 0) {
         return RUN_GAME_FAILURE;
@@ -121,13 +128,8 @@ RUN_GAME_STATUS TryRunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flag
         }
         break;
     case TYPE_STEAM:
-        ShellExecuteW(NULL, L"open", exeFn, cmdLine, old_working_dir, SW_SHOW);
-        for (;;) {
-            Sleep(100);
-            if (FindAndAttach(false, false, knownGame.ver->gameId)) {
-                return RUN_GAME_SUCCESS;
-            }
-        }
+        // Just run the executable directly. Launching a second copy via
+        // ShellExecute caused the game's double-launch error.
         break;
     default:
         break;
@@ -325,9 +327,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
 
     wchar_t curCmdStr[512];
     for (wchar_t* p = NextCommandLineParam(GetCommandLineW(), curCmdStr); p; p = NextCommandLineParam(p, curCmdStr)) {
+        // Patch flags must be parsed before the CMD_ATTACH block: in the
+        // cross-container path "--attach --vpatch" has no explicit PID and the
+        // flags would otherwise be mistaken for a PID.
+        if (wcscmp(curCmdStr, L"--vpatch") == 0) {
+            flags |= RUN_FLAG_VPATCH;
+            continue;
+        }
+        if (wcscmp(curCmdStr, L"--oilp") == 0) {
+            flags |= RUN_FLAG_OILP;
+            continue;
+        }
         if (curCmdId == CMD_ATTACH) {
+            if (!iswdigit(curCmdStr[0])) {
+                // "--attach" with no explicit PID: keep CMD_ATTACH active so
+                // any following tokens are not mistaken for a game path, and
+                // let the post-loop CMD_ATTACH block poll and attach silently.
+                continue;
+            }
             curCmdId = CMD_NONE;
-
             int pid = _wtoi(curCmdStr);
             if (ApplyToProcById(pid)) {
                 return 0;
@@ -339,6 +357,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
         }
         if (wcscmp(curCmdStr, L"--attach") == 0) {
             curCmdId = CMD_ATTACH;
+            // Start with no patch flags: only --vpatch / --oilp explicitly
+            // present on this command line should be injected. The default
+            // 0xFFFFFFFF (all flags) is for the direct-game launch path.
+            flags = RUN_FLAG_THPRAC;
+            continue;
+        }
+        if (wcscmp(curCmdStr, L"--vpatch") == 0) {
+            flags |= RUN_FLAG_VPATCH;
+            continue;
+        }
+        if (wcscmp(curCmdStr, L"--oilp") == 0) {
+            flags |= RUN_FLAG_OILP;
             continue;
         }
         if (wcscmp(curCmdStr, L"--without-vpatch") == 0) {
@@ -374,39 +404,41 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
         if (GetEnvironmentVariableW(L"THPRAC_ATTACH_WAIT", waitBuf, 16) > 0) {
             waitSecs = _wtoi(waitBuf);
         }
+        // flags contains RUN_FLAG_VPATCH / RUN_FLAG_OILP parsed above from
+        // --vpatch / --oilp, allowing the cross-container helper to inject
+        // the patches from inside the game's own prefix.
         if (waitSecs > 0) {
             for (int i = 0; i < waitSecs * 5; ++i) {
-                if (FindAndAttach(false, false)) {
+                if (FindAndAttach(false, false, ID_UNKNOWN, nullptr, flags)) {
                     return 0;
                 }
                 Sleep(200);
             }
             return 1;
         }
-        return FindAndAttach(false, false) ? 0 : 1;
+        return FindAndAttach(false, false, ID_UNKNOWN, nullptr, flags) ? 0 : 1;
     }
-    else if (!gSettings.dont_search_ongoing_game && FindAndAttach(false, true)) {
-        return 0;
-    }
+    // Do not auto-scan for running games on startup. Injecting thprac into a
+    // game that is already running keeps its double-launch mutex alive, so a
+    // later launch of the same game fails with "2つは起動できません". Games
+    // are attached only through the launcher's explicit launch/watch flows.
 
-    // Look for a known game executable in the same directory as thprac.exe
-    // (and, failing that, in the directory thprac was started from).
-    // If one is found, it is launched with thprac hooked into it automatically.
+    // Auto-launch a game only when its executable sits next to thprac-linux.exe.
+    // When one is found and launched successfully we return 0 below, so the
+    // launcher UI is not shown. Otherwise the launcher opens normally. The
+    // original working directory is deliberately NOT searched: Proton often
+    // starts us with a game folder as CWD, which caused an unintended second
+    // game launch with "2つは起動できません".
     if (gSettings.existing_game_launch_action != LAUNCH_ACTION_OPEN_LAUNCHER) {
-        std::wstring searchDirs[2];
-        {
-            // The current directory was set to thprac's own directory above.
-            wchar_t cur[MAX_PATH + 1] = {};
-            GetCurrentDirectoryW(MAX_PATH, cur);
-            searchDirs[0] = cur;
-        }
-        searchDirs[1] = old_working_dir;
+        wchar_t cur[MAX_PATH + 1] = {};
+        GetCurrentDirectoryW(MAX_PATH, cur);
+        std::wstring searchDirs[1] = { cur };
 
         const wchar_t* selfPath = CurrentPeb()->ProcessParameters->ImagePathName.Buffer;
         const size_t selfPathLen = CurrentPeb()->ProcessParameters->ImagePathName.Length / sizeof(wchar_t);
 
         bool openLauncher = false;
-        for (int dirIdx = 0; dirIdx < 2 && !openLauncher; dirIdx++) {
+        for (int dirIdx = 0; dirIdx < 1 && !openLauncher; dirIdx++) {
             std::wstring& dir = searchDirs[dirIdx];
             while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) {
                 dir.pop_back();
@@ -414,10 +446,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstanc
             if (dir.empty()) {
                 continue;
             }
-            if (dirIdx == 1 && PathsCompare(searchDirs[0].c_str(), searchDirs[0].size(), dir.c_str(), dir.size())) {
-                continue;
-            }
-
             for (int originalNamePass = 1; originalNamePass >= 0 && !openLauncher; originalNamePass--) {
                 WIN32_FIND_DATAW find = {};
                 std::wstring pattern = dir + L"\\*.exe";

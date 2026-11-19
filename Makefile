@@ -66,14 +66,22 @@ $(TOOLCHAIN): | $(BUILD_DIR)
 	'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)' \
 	'set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)' > $@
 
-.PHONY: nc
-nc: $(TOOLCHAIN) $(BUILD_DIR)/.locale $(FT64_LIB) CMakeLists.txt
+# CMake configure/build is driven by a stamp file so it only re-runs when
+# the build inputs change. Previously "nc" was phony and reconfigured +
+# relinked the whole module on every single make invocation.
+$(STAMP_NC): $(TOOLCHAIN) $(BUILD_DIR)/.locale $(FT64_LIB) CMakeLists.txt \
+		thprac/src/thprac/thprac_th06nc.cpp thprac/src/thprac/thprac_th06nc.h \
+		thprac/src/thprac/thprac_th06nc_map.h
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) -DCMAKE_BUILD_TYPE=Release \
 		-DTHPRAC_FT_STATIC=$(FT64_LIB) -DTHPRAC_FT_STATIC_INCLUDE=$(FT64_PREFIX)/include/freetype2
 	cmake --build $(BUILD_DIR) --target thprac_th06nc thprac_bridge64 -j$(NPROC)
+	touch $@
 
-$(BIN_DLL) $(BIN_BRIDGE): nc
+$(BIN_DLL) $(BIN_BRIDGE): $(STAMP_NC)
 	@:
+
+.PHONY: nc
+nc: $(STAMP_NC)
 
 $(DIST_DIR):
 	mkdir -p $(DIST_DIR)
@@ -141,7 +149,24 @@ $(FT64_LIB): $(FT64_DIR)/freetype-$(FT_VERSION).tar.xz $(TOOLCHAIN)
 
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_BRIDGE) $(XATTACH_ELF) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+# Compile each launcher source separately so a single edit only rebuilds that
+# translation unit. -MMD -MP emits header dependencies into .d files, so
+# changes to the 212 project headers are detected correctly.
+LAUNCHER_OBJ_DIR := $(LAUNCHER_BUILD)/obj
+LAUNCHER_OBJS := $(patsubst %.cpp,$(LAUNCHER_OBJ_DIR)/%.o,$(filter %.cpp,$(LAUNCHER_SRCS))) \
+                $(patsubst %.c,$(LAUNCHER_OBJ_DIR)/%.o,$(filter %.c,$(LAUNCHER_SRCS)))
+
+$(LAUNCHER_OBJ_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(MINGW32_CXX) $(LAUNCHER_CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(LAUNCHER_OBJ_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(MINGW32_CC) $(LAUNCHER_CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(LAUNCHER_OBJS:.o=.d)
+
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_OBJS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_BRIDGE) $(XATTACH_ELF) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
 	cp $(BIN_BRIDGE) $(LAUNCHER_BUILD)/payload/thprac_bridge64.exe
@@ -153,7 +178,7 @@ $(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt
 	$(PYTHON) tools/make_payload_rc.py $(LAUNCHER_BUILD)/payload $(LAUNCHER_BUILD)/bundle/payload.rc $(LAUNCHER_BUILD)/bundle
 	$(WINDRES32) -Ithprac -Ithprac/src/thprac thprac/thprac.rc -O coff -o $(LAUNCHER_BUILD)/thprac.rc.o
 	$(WINDRES32) $(LAUNCHER_BUILD)/bundle/payload.rc -O coff -o $(LAUNCHER_BUILD)/bundle/payload.res
-	$(MINGW32_CXX) $(LAUNCHER_CXXFLAGS) $(LAUNCHER_SRCS) $(LAUNCHER_BUILD)/thprac.rc.o $(LAUNCHER_BUILD)/bundle/payload.res -o $@ $(LAUNCHER_LDFLAGS)
+	$(MINGW32_CXX) $(LAUNCHER_OBJS) $(LAUNCHER_BUILD)/thprac.rc.o $(LAUNCHER_BUILD)/bundle/payload.res -o $@ $(LAUNCHER_LDFLAGS)
 	@if $(OBJDUMP32) -p $@ | grep -qiE 'DLL Name: (libstdc\+\+|libwinpthread|libgcc_s)'; then echo "error: $@ still imports MinGW runtime DLLs (not fully static)"; rm -f $@; exit 1; fi
 
 clean:

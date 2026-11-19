@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -252,7 +253,8 @@ static bool nsenterWorks(int pid) {
     return r.started && r.code == 0;
 }
 
-static void doApply(const std::string& selfExe, const std::string& launcherExe, int pid, bool needNs) {
+static void doApply(const std::string& selfExe, const std::string& launcherExe, int pid, bool needNs,
+                    const std::vector<std::string>& patchArgs) {
     std::string environText;
     readAll("/proc/" + std::to_string(pid) + "/environ", environText);
     std::string loader = envValue(environText, "WINELOADER");
@@ -311,6 +313,7 @@ static void doApply(const std::string& selfExe, const std::string& launcherExe, 
                 args.push_back(loader);
                 args.push_back(launcherExe);
                 args.push_back("--attach");
+                for (const auto& a : patchArgs) args.push_back(a);
                 dbg("launch-client variant=" + std::to_string(variant) + " path=" + lclient);
                 auto r = runChild(args, {}, false);
                 rc = r.code;
@@ -326,6 +329,7 @@ static void doApply(const std::string& selfExe, const std::string& launcherExe, 
                 std::vector<std::string> args = {"/usr/bin/nsenter", "-t", std::to_string(pid),
                     "-U", "--preserve-credentials", "-m", "-r", "-w", "--", selfExe,
                     "run", envFile, kLogPath, loader, launcherExe, "--attach"};
+                for (const auto& a : patchArgs) args.push_back(a);
                 auto r = runChild(args, {}, true);
                 rc = r.code;
                 dbg("nsenter rc=" + std::to_string(rc));
@@ -333,7 +337,9 @@ static void doApply(const std::string& selfExe, const std::string& launcherExe, 
             }
         }
     } else {
-        auto r = runChild({loader, launcherExe, "--attach"}, env, true);
+        std::vector<std::string> dargs = {loader, launcherExe, "--attach"};
+        for (const auto& a : patchArgs) dargs.push_back(a);
+        auto r = runChild(dargs, env, true);
         rc = r.code;
         dbg("direct rc=" + std::to_string(rc));
     }
@@ -477,6 +483,55 @@ static void doUpdate(const std::string& exeHex, const std::string& stagedHex, co
     _exit(1);
 }
 
+// Kill a game process by name in any Wine prefix. Runs on the host via
+// --alongside-steam; scans /proc for a matching game exe and terminates it
+// (using nsenter when the process is in another mount namespace).
+static int doKill(const std::string& exeNameHex, const std::string& outPath) {
+    std::string want = lower(hexDecode(exeNameHex));
+    std::vector<int> pids;
+    DIR* d = opendir("/proc");
+    if (!d) return 1;
+    while (dirent* e = readdir(d)) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int pid = atoi(e->d_name);
+        // Wine game processes have comm = wine-preloader; the real exe name is
+        // in cmdline. Use the same extraction as scan_procs.
+        std::string name;
+        std::string cmdline;
+        if (readAll("/proc/" + std::to_string(pid) + "/cmdline", cmdline)) {
+            for (const auto& arg : split(cmdline, '\0')) {
+                if (arg.size() < 4) continue;
+                if (!(arg[0] >= 'A' && arg[0] <= 'Z') && !(arg[0] >= 'a' && arg[0] <= 'z')) continue;
+                if (arg[1] != ':' || (arg[2] != '\\' && arg[2] != '/')) continue;
+                std::string n = lower(baseName(arg));
+                if (n.size() > 4 && n.substr(n.size() - 4) == ".exe") { name = n; break; }
+            }
+        }
+        if (name.empty()) {
+            std::string comm;
+            if (readAll("/proc/" + std::to_string(pid) + "/comm", comm)) name = lower(split(comm, '\n')[0]);
+        }
+        if (name == want || (!want.empty() && name.find(want) != std::string::npos)) pids.push_back(pid);
+    }
+    closedir(d);
+    int killed = 0;
+    for (int pid : pids) {
+        // Try direct kill first (host can signal other namespaces' processes).
+        if (kill(pid, SIGTERM) == 0) { ++killed; continue; }
+        if (kill(pid, SIGKILL) == 0) { ++killed; continue; }
+        // Fall back to nsenter for containers that hide signals.
+        if (access("/usr/bin/nsenter", X_OK) == 0) {
+            std::vector<std::string> args = {"/usr/bin/nsenter", "-t", std::to_string(pid),
+                "-U", "--preserve-credentials", "-m", "-r", "-w", "--", "/bin/kill", "-9", std::to_string(pid)};
+            auto r = runChild(args, {}, true);
+            if (r.code == 0) ++killed;
+        }
+    }
+    dbg("kill matched=" + std::to_string(pids.size()) + " killed=" + std::to_string(killed));
+    if (!outPath.empty()) { FILE* f = fopen(outPath.c_str(), "a"); if (f) { fprintf(f, "RC %d\nDONE\n", killed ? 0 : 1); fclose(f); } }
+    return killed ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) return 2;
     std::string mode = argv[1];
@@ -492,6 +547,11 @@ int main(int argc, char** argv) {
         auto r = runChild(args, env, true);
         dbg("run rc=" + std::to_string(r.code));
         return r.code;
+    }
+    if (mode == "kill") {
+        if (argc < 4) return 2;
+        redirectLog(argv[3]);
+        return doKill(argv[2], argv[3]);
     }
     if (mode == "cmd") {
         if (argc < 6) return 2;
@@ -538,7 +598,9 @@ int main(int argc, char** argv) {
     if (mode == "scan") {
         doScan();
     } else if (mode == "apply" && argc >= 8) {
-        doApply(selfExe, argv[5], atoi(argv[6]), std::string(argv[7]) == "1");
+        std::vector<std::string> patchArgs;
+        for (int i = 8; i < argc; ++i) patchArgs.push_back(argv[i]);
+        doApply(selfExe, argv[5], atoi(argv[6]), std::string(argv[7]) == "1", patchArgs);
     } else {
         emit("ERR bad mode/args\nDONE\n");
         return 2;

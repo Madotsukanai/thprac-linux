@@ -436,6 +436,9 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
     }
 
     SaveSettings();
+    state->reflectiveGamePid = 0;
+    state->reflectiveGameExited = false;
+    state->reflectiveExeName.clear();
 
     switch (state->settings.after_launch) {
     case LAUNCH_CLOSE:
@@ -479,6 +482,7 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
                 state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
                 state->reflectivePatchFlags =
                     (inst->allow_oilp ? RUN_FLAG_OILP : 0) | (inst->allow_vpatch ? RUN_FLAG_VPATCH : 0);
+                state->reflectiveExeName = SteamAppExeName(inst->path ? inst->path : "");
             }
             if (!RunLaunchCommand(utf8_to_utf16(inst->path).c_str())) {
                 if (inst->apply_thprac) {
@@ -512,6 +516,7 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
                 state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
                 state->reflectivePatchFlags =
                     (inst->allow_oilp ? RUN_FLAG_OILP : 0) | (inst->allow_vpatch ? RUN_FLAG_VPATCH : 0);
+                state->reflectiveExeName = SteamAppExeName(inst->path ? inst->path : "");
             }
             // Steam entries hold steam:// URLs; dispatch them through the
             // shared runner so containerized launchers can reach the host
@@ -1119,9 +1124,27 @@ static bool DetailsPage(LauncherState* state) {
 
     if (state->reflectiveLaunchID == game->id) {
         if (LargeBottomButton(S(THPRAC_GAMES_LAUNCH_ABORT_WAIT), 64.0f)) {
+            // Terminate the launched game process. Cross-prefix games (e.g.
+            // steam://rungameid/...) are not visible to our wineserver, so ask
+            // the native helper to find and kill it by exe name on the host.
+            std::string exeName = state->reflectiveExeName.empty()
+                ? PrimaryExeNameForGame(game->id) : state->reflectiveExeName;
+            if (!exeName.empty()) {
+                WineAttach::KillGameProcess(exeName);
+            }
+            if (state->reflectiveGamePid) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, state->reflectiveGamePid);
+                if (h) {
+                    TerminateProcess(h, 1);
+                    CloseHandle(h);
+                }
+            }
             state->reflectiveLaunchID = ID_UNKNOWN;
             state->reflectiveLaunchStart = 0;
             state->reflectiveAppId.clear();
+            state->reflectivePatchFlags = 0;
+            state->reflectiveGamePid = 0;
+            state->reflectiveGameExited = false;
             state->closeAfterLaunch = false;
         }
     } else {
