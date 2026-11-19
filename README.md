@@ -1,3 +1,5 @@
+[**English**](README_en.md)
+
 # thprac-linux
 
 [thprac](https://github.com/touhouworldcup/thprac) の非公式フォークです。東方紅魔郷 New Classic (th06nc / NC) のプラクティスサポートを含み、Linux 上で Wine/Proton を使って動かすためのビルドです。
