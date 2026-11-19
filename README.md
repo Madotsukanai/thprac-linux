@@ -15,7 +15,7 @@
 
 このフォークはそのギャップを埋めるものです:
 
-- Linux 上で MinGW-w64 クロスコンパイルが可能(`make` 一発、初回は FreeType を自動取得)
+- Linux 上で MinGW-w64 クロスコンパイルが可能
 - MinGW ランタイム DLL を静的リンクで除去し、Wine/Proton 環境へ配布しやすい単一 exe に統合
 - Unix 側の処理を静的 ELF ヘルパー (`thprac-xattach`) が担い、Windows 側から Unix コマンドを実行しない
 - `--alongside-steam` + nsenter で **別の Proton コンテナ** のゲームにもアタッチ
