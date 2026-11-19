@@ -4,6 +4,26 @@
 
 成果物は単一の Windows 実行ファイル `thprac-linux.exe` で、32bit ランチャー + 64bit NC モジュール + Unix ヘルパーを内蔵しています。
 
+## 上流の「Linux 対応」について
+
+上流の [thprac](https://github.com/touhouworldcup/thprac) は README の Compatibility 節で「Wine と Steam Deck に対応する」と述べていますが、これは **Windows バイナリを Wine 上で動かせる** という意味に限られ、Linux ネイティブ対応ではありません。実際のところ:
+
+- ビルドは `msbuild thprac.sln` / Visual Studio / `cl.exe` など **Windows 専用**で、Linux でビルドする手段は無い
+- README 自身が **Steam ゲームでは「ゲームと同じフォルダに置く」方式は動かない** と明記している
+- Proton の別コンテナや別 Wine prefix のゲームにアタッチする仕組みは無い(単一 wineserver 内のプロセスを探す前提)
+- Unix 側の処理を呼ぶ仕組みも無く、コンテナをまたぐアタッチは設計上不可能
+
+このフォークはそのギャップを埋めるものです:
+
+- Linux 上で MinGW-w64 クロスコンパイルが可能(`make` 一発、初回は FreeType を自動取得)
+- MinGW ランタイム DLL を静的リンクで除去し、Wine/Proton 環境へ配布しやすい単一 exe に統合
+- Unix 側の処理を静的 ELF ヘルパー (`thprac-xattach`) が担い、Windows 側から Unix コマンドを実行しない
+- `--alongside-steam` + nsenter で **別の Proton コンテナ** のゲームにもアタッチ
+- Steam ショートカット (`shortcuts.vdf`) から起動コマンドの実 exe を解決
+- Releases の asset digest (SHA-256) を使った署名付き自動アップデート
+
+つまり「上流は Linux 対応を自称しているが、実態は Wine で動くだけ」であり、本フォークはその不足分を補っています。
+
 ## 特徴
 
 - NC (th06nc.exe) 専用のプラクティスモジュール (`thprac_th06nc.dll` + `thprac_bridge64.exe`) を内蔵
