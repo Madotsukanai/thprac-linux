@@ -9,11 +9,41 @@
 #include "thprac_wine_attach.h"
 
 #include <psapi.h>
-
 #define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
 #define GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
 
 namespace THPrac {
+// Attach on a worker thread to keep the UI responsive during injection.
+struct AsyncAttachJob {
+    LauncherState* state;
+    THGameID game;
+    std::string appId;
+    std::string exeName;
+    uint32_t patchFlags;
+};
+static DWORD WINAPI LauncherAttachWorker(LPVOID param) {
+    auto* job = static_cast<AsyncAttachJob*>(param);
+    DWORD foundPid = 0;
+    std::wstring exeWide;
+    if (!job->exeName.empty()) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, job->exeName.c_str(), (int)job->exeName.size(), nullptr, 0);
+        exeWide.resize(n > 0 ? (size_t)n : 0);
+        if (n > 0) MultiByteToWideChar(CP_UTF8, 0, job->exeName.c_str(), (int)job->exeName.size(), exeWide.data(), n);
+    }
+    bool attached = FindAndAttach(false, false, job->game,
+        job->appId.empty() ? nullptr : job->appId.c_str(),
+        job->patchFlags | RUN_FLAG_THPRAC, &foundPid,
+        exeWide.empty() ? nullptr : exeWide.c_str());
+    job->state->reflectiveGamePid = foundPid;
+    job->state->attachWorkerResult.store(attached, std::memory_order_release);
+    job->state->attachWorkerBusy.store(false, std::memory_order_release);
+    delete job;
+    return 0;
+}
+
+
+
+
 namespace Gui {
     extern LRESULT ImplWin32WndProcHandlerW(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     extern HWND ImplWin32GetHwnd();
@@ -421,13 +451,26 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
     ImGui::EndTabBar();
 
     if (state->reflectiveLaunchID) {
-        // Track the launched game process. FindAndAttach reports its PID once
-        // the process appears; if that process later exits, stop waiting.
-        DWORD foundPid = 0;
-        bool attached = FindAndAttach(false, false, state->reflectiveLaunchID,
-            state->reflectiveAppId.empty() ? nullptr : state->reflectiveAppId.c_str(),
-            state->reflectivePatchFlags | RUN_FLAG_THPRAC, &foundPid,
-            state->reflectiveExeName.empty() ? nullptr : utf8_to_utf16(state->reflectiveExeName.c_str()).c_str());
+        // Throttled background attach attempts.
+        ULONGLONG nowTicks = GetTickCount64();
+        bool busy = state->attachWorkerBusy.load(std::memory_order_acquire);
+        bool gameExited = false;
+        bool attached = !busy && state->attachWorkerResult.load(std::memory_order_acquire);
+        if (attached) state->attachWorkerResult.store(false, std::memory_order_release);
+        if (!busy && !attached && nowTicks >= state->attachWorkerNextTry &&
+            nowTicks - state->reflectiveLaunchStart > 1500) {
+            auto* job = new AsyncAttachJob{ state, state->reflectiveLaunchID, state->reflectiveAppId,
+                state->reflectiveExeName, state->reflectivePatchFlags };
+            state->attachWorkerBusy.store(true, std::memory_order_release);
+            HANDLE h = CreateThread(nullptr, 0, LauncherAttachWorker, job, 0, nullptr);
+            if (h) {
+                CloseHandle(h);
+            } else {
+                delete job;
+                state->attachWorkerBusy.store(false, std::memory_order_release);
+                state->attachWorkerNextTry = nowTicks + 1000;
+            }
+        }
         if (attached) {
             state->reflectiveLaunchID = ID_UNKNOWN;
             state->reflectiveLaunchStart = 0;
@@ -435,31 +478,30 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
             state->reflectivePatchFlags = 0;
         state->reflectiveExeName.clear();
             state->reflectiveGamePid = 0;
-            state->reflectiveGameExited = false;
+            gameExited = false;
         } else {
-            if (foundPid) state->reflectiveGamePid = foundPid;
             if (state->reflectiveGamePid) {
                 HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, state->reflectiveGamePid);
                 if (!h) {
                     // Process no longer exists -> it exited.
-                    state->reflectiveGameExited = true;
+                    gameExited = true;
                 } else {
                     DWORD code = 0;
                     if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0 ||
                         (GetExitCodeProcess(h, &code) && code != STILL_ACTIVE)) {
-                        state->reflectiveGameExited = true;
+                        gameExited = true;
                     }
                     CloseHandle(h);
                 }
             }
-            if (state->reflectiveGameExited) {
+            if (gameExited) {
                 state->reflectiveLaunchID = ID_UNKNOWN;
                 state->reflectiveLaunchStart = 0;
                 state->reflectiveAppId.clear();
                 state->reflectivePatchFlags = 0;
         state->reflectiveExeName.clear();
                 state->reflectiveGamePid = 0;
-                state->reflectiveGameExited = false;
+                gameExited = false;
                 state->closeAfterLaunch = false;
             }
         }

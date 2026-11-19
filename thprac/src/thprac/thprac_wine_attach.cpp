@@ -112,7 +112,9 @@ std::string ReadAll(const std::wstring& path) {
 bool g_debug = false;
 
 void DebugLog(const std::string& text, bool force = false) {
-    if (!g_debug && !force) {
+    // Detailed diagnostics are opt-in via THPRAC_TRACE to avoid flooding the
+    // shared log from per-frame polling.
+    if (!AttachLogEnabled() || (!g_debug && !force)) {
         return;
     }
     log_printf("%s\n", text.c_str());
@@ -321,60 +323,6 @@ std::string UnixToDosPath(const std::string& unixUtf8) {
         return {};
     }
     return utf16_to_utf8(ToDosPath(unixUtf8).c_str());
-}
-
-// Steam AppID of a game whose container the attach helper can be dispatched
-// into directly (see TryInnerAppAttach); nullptr when unknown.
-static const char* KnownSteamAppId(THGameID wanted) {
-    return wanted == ID_TH06NC ? "4659620" : nullptr;
-}
-
-// The plain scan cannot see processes of other Steam containers from inside a
-// pressure-vessel sandbox (their /proc entries are unreadable and nsenter to
-// the host fails with EPERM). For games with a known AppID the attach helper
-// can instead be dispatched straight into the game's own container via
-// steam-runtime-launch-client, where the local wineserver sees the game.
-// Returns 1 when a game was attached, 0 when the helper ran cleanly but no
-// game appeared within its wait window, -1 when the dispatch itself failed.
-static int TryInnerAppAttach(THGameID wanted, bool prompt, const char* steamAppId) {
-    const char* appId = (steamAppId && *steamAppId) ? steamAppId : KnownSteamAppId(wanted);
-    if (!appId) {
-        return false;
-    }
-    char normalizedAppId[24];
-    // Normalize a 64-bit shortcut GameID down to its 32-bit AppID.
-    {
-        unsigned long long v = strtoull(appId, nullptr, 10);
-        if (v > 0xFFFFFFFFull) {
-            snprintf(normalizedAppId, sizeof(normalizedAppId), "%llu", v >> 32);
-            appId = normalizedAppId;
-        }
-    }
-    DebugLog(std::string("no scan candidates; dispatching attach into app container ") + appId, true);
-    // The dispatched helper waits for the target Wine process, then up to 60s
-    // for the game to become attachable.
-    // (THPRAC_ATTACH_WAIT), so one dispatch covers the whole launch window.
-    ScriptResult inner;
-    if (!RunScript("apply_inner", 0, false, 150000, inner, std::string("INNERAPP=") + appId)) {
-        DebugLog("apply_inner: script failed to start/complete", true);
-        return -1;
-    }
-    int status = -1;
-    for (const auto& line : SplitLines(inner.out)) {
-        if (line == "RC 0") {
-            status = 1;
-        } else if (line == "RC 1") {
-            // The helper ran, waited for the game and timed out without one.
-            if (status < 0) status = 0;
-        } else if (line.rfind("ERR ", 0) == 0) {
-            DebugLog(line.substr(4));
-        }
-    }
-    DebugLog(std::string("apply_inner result: status=") + std::to_string(status), true);
-    if (status == 1 && prompt) {
-        log_mbox(0, MB_ICONASTERISK | MB_OK, S(THPRAC_PR_COMPLETE), S(THPRAC_PR_INFO_ATTACHED));
-    }
-    return status;
 }
 
 static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId,

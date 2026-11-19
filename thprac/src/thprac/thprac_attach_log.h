@@ -8,7 +8,16 @@
 
 namespace THPrac {
 
+inline bool AttachLogEnabled() {
+    static bool enabled = [] {
+        wchar_t v[8] = {};
+        return GetEnvironmentVariableW(L"THPRAC_TRACE", v, 8) > 0;
+    }();
+    return enabled;
+}
+
 inline void AttachLog(const char* fmt, ...) {
+    if (!AttachLogEnabled()) return;
     char msg[1024];
     va_list va;
     va_start(va, fmt);

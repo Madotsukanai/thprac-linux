@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <atomic>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -203,7 +204,11 @@ struct LauncherState {
     std::string reflectiveAppId;
     uint32_t reflectivePatchFlags = 0; // RUN_FLAG_OILP / RUN_FLAG_VPATCH for the pending launch
     DWORD reflectiveGamePid = 0;        // PID of the launched game process (0 = not started yet)
-    bool reflectiveGameExited = false;  // set when the launched process has exited
+    // Background attach worker: keeps the UI responsive while FindAndAttach
+    // injects into the game (which can block for seconds in LoadRemoteLibrary).
+    std::atomic<bool> attachWorkerBusy{ false };
+    std::atomic<bool> attachWorkerResult{ false };
+    ULONGLONG attachWorkerNextTry = 0;
     std::string reflectiveExeName;      // resolved executable name from the Steam launch command
     LauncherThcrapSelection thcrapSel;
 

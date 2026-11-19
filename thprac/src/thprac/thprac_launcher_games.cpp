@@ -437,7 +437,6 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
 
     SaveSettings();
     state->reflectiveGamePid = 0;
-    state->reflectiveGameExited = false;
     state->reflectiveExeName.clear();
 
     switch (state->settings.after_launch) {
@@ -1144,7 +1143,6 @@ static bool DetailsPage(LauncherState* state) {
             state->reflectiveAppId.clear();
             state->reflectivePatchFlags = 0;
             state->reflectiveGamePid = 0;
-            state->reflectiveGameExited = false;
             state->closeAfterLaunch = false;
         }
     } else {
