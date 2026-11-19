@@ -343,7 +343,29 @@ bool ApplyToProcById(DWORD pid) {
     return true;
 }
 
-bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gameID, const char* steamAppId) {
+// Inject optional input-lag patches into an already-running game process.
+// Used when the game was started by an external launch command (TYPE_COMMAND),
+// where the CREATE_SUSPENDED injection window of RunGame is not available.
+static void InjectPatchesIntoProcess(HANDLE hProc, uint32_t patchFlags) {
+    if (!(patchFlags & (RUN_FLAG_OILP | RUN_FLAG_VPATCH))) return;
+    wchar_t path[32768];
+    DWORD length = DWORD(std::size(path));
+    if (!QueryFullProcessImageNameW(hProc, 0, path, &length)) return;
+    std::wstring exeDir(path, length);
+    size_t slash = exeDir.find_last_of(L"\\/");
+    exeDir.resize(slash == std::wstring::npos ? 0 : slash);
+    bool injected = false;
+    if (patchFlags & RUN_FLAG_OILP) {
+        std::wstring dll = exeDir + L"\\openinputlagpatch.dll";
+        injected = LoadRemoteLibrary(hProc, dll.c_str());
+    }
+    if (!injected && (patchFlags & RUN_FLAG_VPATCH)) {
+        injected = TryLoadVpatch(hProc, exeDir.c_str());
+    }
+    AttachLog("inject patches flags=%u ok=%d", (unsigned)patchFlags, injected ? 1 : 0);
+}
+
+bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gameID, const char* steamAppId, uint32_t patchFlags) {
     AttachLog("FindAndAttach(no=%d yes=%d game=%d)", prompt_if_no_game?1:0, prompt_if_yes_game?1:0, (int)gameID);
     bool hasPrompted = false;
     auto TryProcess = [&](SYSTEM_PROCESS_INFORMATION* proc, THGameID requiredGameID) -> bool {
@@ -370,9 +392,15 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
                 return false;
             }
         }
+        if (!(patchFlags & RUN_FLAG_THPRAC)) {
+            InjectPatchesIntoProcess(hProc, patchFlags);
+        }
         const bool applied = gameSig->gameId == ID_TH06NC
             ? LaunchTH06NC(true, proc->UniqueProcessId)
             : WriteTHPracSig(hProc, base) && LoadSelf(hProc);
+        if (applied && (patchFlags & RUN_FLAG_THPRAC)) {
+            InjectPatchesIntoProcess(hProc, patchFlags);
+        }
         AttachLog("pid=%lu applied=%d", (unsigned long)proc->UniqueProcessId, applied ? 1 : 0);
         if (applied) {
             if (prompt_if_yes_game) {
@@ -382,8 +410,10 @@ bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID gam
             return true;
         }
         else {
-            hasPrompted = true;
-            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
+            if (prompt_if_yes_game) {
+                hasPrompted = true;
+                log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
+            }
             return true;
         }
     };

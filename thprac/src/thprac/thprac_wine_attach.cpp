@@ -3,6 +3,7 @@
 #include "thprac_wine_attach.h"
 #include "thprac_identify.h"
 #include "thprac_log.h"
+#include "thprac_log_dir.h"
 #include "thprac_gui_locale.h"
 #include "thprac_utils.h"
 #include "thprac_native.h"
@@ -11,6 +12,7 @@
 
 #include <atomic>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -74,16 +76,6 @@ std::wstring ToDosPath(const std::string& unixPath) {
     return ret;
 }
 
-std::string ShellQuote(const std::string& s) {
-    std::string r = "'";
-    for (char c : s) {
-        if (c == '\'') r += "'\\''";
-        else r += c;
-    }
-    r += '\'';
-    return r;
-}
-
 bool WriteAll(const std::wstring& path, const std::string& data) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -124,355 +116,20 @@ void DebugLog(const std::string& text, bool force = false) {
     }
     log_printf("%s\n", text.c_str());
 
-    // Two locations: $HOME (readable from outside the prefix) and the thprac
-    // data directory of the current prefix (always writable).
-    static std::vector<std::wstring> paths;
-    static bool init = false;
-    bool first = !init;
-    if (!init) {
-        init = true;
-        wchar_t home[MAX_PATH] = {};
-        DWORD n = GetEnvironmentVariableW(L"HOME", home, MAX_PATH);
-        if (n && n < MAX_PATH) {
-            paths.push_back(ToDosPath(utf16_to_utf8(home) + "/thprac-wine-attach.log"));
-        }
-        wchar_t appdata[MAX_PATH] = {};
-        n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-        if (n && n < MAX_PATH) {
-            CreateDirectoryW((std::wstring(appdata) + L"\\thprac").c_str(), nullptr);
-            paths.push_back(std::wstring(appdata) + L"\\thprac\\wine_attach.log");
-        }
-        wchar_t temp[MAX_PATH] = {};
-        n = GetTempPathW(MAX_PATH, temp);
-        if (n && n < MAX_PATH) {
-            paths.push_back(std::wstring(temp) + L"thprac-wine-attach.log");
-        }
-    }
+    // One shared location, reachable from every prefix and the host.
+    static std::wstring path = LogPath(L"wine_attach.log");
     std::string line = text + "\n";
-    for (const auto& path : paths) {
+    if (!path.empty()) {
         HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            continue;
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            SetFilePointer(h, 0, nullptr, FILE_END);
+            WriteFile(h, line.data(), (DWORD)line.size(), &written, nullptr);
+            CloseHandle(h);
         }
-        DWORD written = 0;
-        SetFilePointer(h, 0, nullptr, FILE_END);
-        WriteFile(h, line.data(), (DWORD)line.size(), &written, nullptr);
-        CloseHandle(h);
     }
 }
-
-// ---------------------------------------------------------------------------
-// The Unix side. Runs natively through "/bin/sh" (Wine starts non-PE
-// executables natively), so it only relies on POSIX sh plus tr/sed/readlink.
-// MODE, OUT, SELF, TARGET and NEEDNS are prepended by the launcher.
-// ---------------------------------------------------------------------------
-const char kScriptBody[] = R"SH(
-LC_ALL=C; export LC_ALL
-
-dbg() { printf '%s\n' "$*" >> "$OUT.log"; }
-envof() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n "s/^$2=//p" | head -n 1; }
-
-# Some PATHs expose the legacy-runtime run.sh stub under this name (it fails with
-# "exec: --: invalid option"), so only accept the real pressure-vessel binary.
-valid_lc() {
-  [ -x "$1" ] || return 1
-  case ${1##*/} in steam-runtime-launch-client) ;; *) return 1 ;; esac
-  case $(readlink -f "$1" 2>/dev/null) in *.sh|*stub*) return 1 ;; esac
-  return 0
-}
-find_launch_client() {
-  p=$(command -v steam-runtime-launch-client 2>/dev/null)
-  if [ -n "$p" ] && valid_lc "$p"; then printf '%s\n' "$p"; return 0; fi
-  for c in \
-    "$HOME/.local/share/Steam/steamapps/common/SteamLinuxRuntime_4/pressure-vessel/bin/steam-runtime-launch-client" \
-    "$HOME/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/pressure-vessel/bin/steam-runtime-launch-client" \
-    "$HOME/.local/share/Steam/steamapps/common/SteamLinuxRuntime_soldier/pressure-vessel/bin/steam-runtime-launch-client" \
-    "$HOME/.local/share/Steam/steamrt64/pv-runtime/steam-runtime-steamrt/pressure-vessel/bin/steam-runtime-launch-client" \
-    "$HOME/.local/share/Steam/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-launch-client" \
-    "$HOME/.local/share/Steam/ubuntu12_32/steam-runtime/usr/bin/steam-runtime-launch-client" \
-    "$HOME/.steam/root/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-launch-client" \
-    "$HOME/.steam/root/ubuntu12_32/steam-runtime/usr/bin/steam-runtime-launch-client" \
-    "$HOME/.steam/steam/ubuntu12_32/steam-runtime/amd64/usr/bin/steam-runtime-launch-client" \
-    "$HOME/.steam/steam/ubuntu12_32/steam-runtime/usr/bin/steam-runtime-launch-client"
-  do
-    valid_lc "$c" && { printf '%s\n' "$c"; return 0; }
-  done
-  for c in "$HOME"/.local/share/Steam/steamapps/common/SteamLinuxRuntime_*/pressure-vessel/bin/steam-runtime-launch-client; do
-    valid_lc "$c" && { printf '%s\n' "$c"; return 0; }
-  done
-  return 1
-}
-lclient=$(find_launch_client 2>/dev/null || true)
-
-own=${WINEPREFIX:-$HOME/.wine}
-own=$(readlink -f "$own" 2>/dev/null || printf %s "$own")
-ownmnt=$(readlink /proc/self/ns/mnt 2>/dev/null)
-
-to=
-command -v timeout >/dev/null 2>&1 && to="timeout 10"
-
-# Ways of entering a pressure-vessel container with nsenter. The container is
-# an unprivileged user namespace, so plain "nsenter -m" fails (EPERM); the user
-# namespace must be joined first (-U), and its setgroups is denied, hence
-# --preserve-credentials (otherwise: "setgroups failed").
-nsopts() {
-  case $1 in
-    1) echo "-U --preserve-credentials -m -r -w" ;;
-    2) echo "--preserve-credentials -m -r -w" ;;
-    3) echo "-U -m -r -w" ;;
-  esac
-}
-pick_nsenter() {
-  command -v nsenter >/dev/null 2>&1 || return 1
-  for n in 1 2 3; do
-    v=$(nsopts $n)
-    $to nsenter -t "$1" $v true >> "$OUT.log" 2>&1
-    r=$?
-    if [ "$r" = 0 ]; then printf '%s\n' "$v"; return 0; fi
-    dbg "   nsenter [$v] rc=$r"
-  done
-  return 1
-}
-
-scan_procs() {
-  root=${1:-/proc}
-  dbg "== scan root=$root: own=$own ownmnt=$ownmnt uid=$(id -u 2>/dev/null) pid1=$(cat $root/1/comm 2>/dev/null)"
-  dbg "   $(grep -E '^NSpid' $root/self/status 2>/dev/null)"
-  dbg "   tools: nsenter=$(command -v nsenter) launch-client=${lclient:-$(command -v steam-runtime-launch-client 2>/dev/null)}"
-  total=0; unreadable=0; winelike=0; found=0; tested=0
-  for d in "$root"/[0-9]*; do
-    pid=${d##*/}
-    total=$((total+1))
-    exe=$(readlink "$d/exe" 2>/dev/null) || { unreadable=$((unreadable+1)); continue; }
-    exe=${exe% (deleted)}
-    case ${exe##*/} in
-      wine-preloader|wine64-preloader|wine|wine64|wine-stable|wine-development) ;;
-      *) continue ;;
-    esac
-    winelike=$((winelike+1))
-    arg0=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | head -n 1)
-    comm=$(cat "$d/comm" 2>/dev/null)
-    name=
-    case $arg0 in
-      [Cc]:\\[Ww][Ii][Nn][Dd][Oo][Ww][Ss]\\*) dbg "   skip pid=$pid (system) arg0=[$arg0]"; continue ;;
-      ?:\\*) name=${arg0##*\\} ;;
-    esac
-    if [ -z "$name" ]; then
-      # Proton/Wine often has a Unix argv0 (e.g. start.exe path or wine-preloader);
-      # find the first non-system DOS .exe argument (the actual game).
-      name=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | while IFS= read -r a; do
-        case $a in
-          [Cc]:\\[Ww][Ii][Nn][Dd][Oo][Ww][Ss]\\*) continue ;;
-          [A-Za-z]:\\*.[Ee][Xx][Ee]) printf '%s\n' "${a##*\\}"; break ;;
-          [A-Za-z]:\\*.[Ee][Xx][Ee]\ *) printf '%s\n' "${a##*\\}"; break ;;
-        esac
-      done)
-    fi
-    [ -n "$name" ] || name=$comm
-    low=$(printf %s "$name" | tr 'A-Z' 'a-z')
-    case $low in
-      *.exe) ;;
-      *) dbg "   skip pid=$pid (not exe) arg0=[$arg0] comm=[$comm]"; continue ;;
-    esac
-    case $low in
-      services.exe|explorer.exe|winedevice.exe|plugplay.exe|svchost.exe|rpcss.exe|conhost.exe|start.exe|cmd.exe|winedbg.exe) dbg "   skip pid=$pid (system) name=[$name]"; continue ;;
-      steam.exe|steamwebhelper.exe|gameoverlayui.exe|crashhandler*.exe|thprac*.exe) dbg "   skip pid=$pid (helper) name=[$name]"; continue ;;
-    esac
-    pfx=$(envof "$pid" WINEPREFIX)
-    if [ -z "$pfx" ]; then
-      h=$(envof "$pid" HOME)
-      pfx=${h:-$HOME}/.wine
-    fi
-    pfx=$(readlink -f "$pfx" 2>/dev/null || printf %s "$pfx")
-    if [ "$pfx" = "$own" ]; then dbg "   skip pid=$pid name=[$name] (own prefix)"; continue; fi
-    ns=0
-    [ "$(readlink "$d/ns/mnt" 2>/dev/null)" != "$ownmnt" ] && ns=1
-    appid=$(envof "$pid" SteamAppId)
-    [ -n "$appid" ] || appid=$(envof "$pid" SteamGameId)
-    dbg "   found pid=$pid name=[$name] prefix=$pfx otherns=$ns appid=[$appid] exe=$exe"
-    printf '%s\t%s\t%s\t%s\n' "$pid" "$name" "$pfx" "$ns" >> "$OUT"
-    found=$((found+1))
-    if [ "$ns" = 1 ] && [ "$tested" = 0 ]; then
-      tested=1
-      # Which way into the other container works from here?
-      if [ -n "$lclient" ] && [ -n "$appid" ]; then
-        $to "$lclient" --inside-app="$appid" -- true >> "$OUT.log" 2>&1
-        rc_probe=$?
-        dbg "   probe launch-client(inside-app) rc=$rc_probe"
-        if [ "$rc_probe" != 0 ]; then
-          $to "$lclient" --bus-name="com.steampowered.App$appid" -- true >> "$OUT.log" 2>&1
-          dbg "   probe launch-client(bus-name) rc=$?"
-        fi
-      fi
-      if v=$(pick_nsenter "$pid"); then
-        dbg "   probe nsenter ok: [$v]"
-      else
-        dbg "   probe nsenter: no working option set"
-      fi
-    fi
-  done
-  dbg "   total=$total unreadable=$unreadable winelike=$winelike found=$found"
-  [ "$found" -gt 0 ]
-}
-
-if [ "$MODE" = scan ]; then
-  if ! scan_procs /proc; then
-    # Running inside a Proton/pressure-vessel container often exposes only its own
-    # PID namespace. Re-scan from the host init namespaces when possible.
-    if command -v nsenter >/dev/null 2>&1 && timeout 0.5s nsenter -t 1 -m -p true >/dev/null 2>&1; then
-      dbg "retry scan via host namespaces (no cross-prefix candidates in current view)"
-      MODE=_scan_host OUT=$OUT OWN=$own OWNMNT=$ownmnt $to nsenter -t 1 -m -p /bin/sh "$0" >> "$OUT.log" 2>&1 || dbg "nsenter host scan failed rc=$?"
-    fi
-  fi
-fi
-if [ "$MODE" = _scan_host ]; then
-  own=$OWN; ownmnt=$OWNMNT
-  scan_procs /proc || true
-fi
-
-if [ "$MODE" = apply_inner ]; then
-  # A pressure-vessel sandbox cannot read other containers' /proc entries and
-  # cannot nsenter to the host, so the usual scan is blind there. Instead of
-  # scanning, dispatch the attach helper into the target app's own container
-  # (steam-runtime-launch-client --inside-app): inside, the local wineserver
-  # sees the game and "thprac.exe --attach" attaches without crossing any
-  # namespace. No scan or PID is needed on this side.
-  dbg "== apply_inner: app=$INNERAPP self=$SELF ppid=$PPID"
-  loader=
-  # Derive a Wine loader able to run the 32-bit helper from the Wine that runs
-  # this script (the launcher's process tree).
-  exe=$(readlink "/proc/$PPID/exe" 2>/dev/null)
-  exe=${exe% (deleted)}
-  dir=${exe%/*}
-  for c in "$dir/wine64" "$dir/wine" "$dir/../../../bin/wine64" "$dir/../../../bin/wine"; do
-    if [ -x "$c" ]; then loader=$c; break; fi
-  done
-  if [ -z "$loader" ]; then
-    for c in "$HOME"/.local/share/Steam/steamapps/common/Proton*/files/bin/wine \
-             "$HOME"/.local/share/Steam/steamapps/common/Proton*/dist/bin/wine; do
-      if [ -x "$c" ]; then loader=$c; break; fi
-    done
-  fi
-  command -v wine64 >/dev/null 2>&1 && [ -z "$loader" ] && loader=$(command -v wine64)
-  command -v wine >/dev/null 2>&1 && [ -z "$loader" ] && loader=$(command -v wine)
-  [ -n "$loader" ] || loader=wine
-  stage="$HOME/.cache/thprac-wine"
-  mkdir -p "$stage" 2>/dev/null
-  cmp -s "$SELF" "$stage/thprac.exe" 2>/dev/null || cp -f "$SELF" "$stage/thprac.exe"
-  runself=$stage/thprac.exe
-  if [ -n "$lclient" ]; then
-    dbg "   dispatch launch-client inside-app=$INNERAPP loader=$loader runself=$runself"
-    "$lclient" --inside-app="$INNERAPP" --directory=/ \
-      --env="THPRAC_WINE_LOCAL_ONLY=1" --env="THPRAC_ATTACH_WAIT=60" \
-      -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
-    rc=$?
-    dbg "   launch-client(inside-app) rc=$rc"
-    echo "RC $rc" >> "$OUT"
-    [ "$rc" = 0 ] || echo "ERR inside-app dispatch rc=$rc" >> "$OUT"
-  else
-    echo "ERR no usable steam-runtime-launch-client for inside-app dispatch" >> "$OUT"
-  fi
-fi
-
-if [ "$MODE" = apply ]; then
-  loader=$(envof "$TARGET" WINELOADER)
-  if [ -z "$loader" ] || [ ! -x "$loader" ]; then
-    exe=$(readlink "/proc/$TARGET/exe" 2>/dev/null)
-    exe=${exe% (deleted)}
-    dir=${exe%/*}
-    loader=
-    for c in "$dir/wine64" "$dir/wine" "$dir/../../../bin/wine64" "$dir/../../../bin/wine"; do
-      if [ -x "$c" ]; then loader=$c; break; fi
-    done
-  fi
-  [ -n "$loader" ] || loader=wine
-  runself=$SELF
-  dbg "== apply: target=$TARGET needns=$NEEDNS loader=$loader"
-  rc=1
-  if [ "$NEEDNS" = 1 ]; then
-    # The target lives in another mount namespace (Steam's pressure-vessel
-    # container). Its wineserver socket is only reachable from inside, and
-    # starting a second wineserver on the same prefix would be harmful, so
-    # enter that container or give up.
-    dbg "   diag: $(nsenter --version 2>&1 | head -n 1) userns(self)=$(readlink /proc/self/ns/user) userns(target)=$(readlink /proc/$TARGET/ns/user) mntns(target)=$(readlink /proc/$TARGET/ns/mnt)"
-    dbg "   diag: unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null) apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null) max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)"
-    dbg "   diag: target $(grep -E '^(Uid|NoNewPrivs|Seccomp):' /proc/$TARGET/status 2>/dev/null | tr '\n\t' '  ')"
-    stage="$HOME/.cache/thprac-wine"
-    mkdir -p "$stage" 2>/dev/null
-    cmp -s "$SELF" "$stage/thprac.exe" 2>/dev/null || cp -f "$SELF" "$stage/thprac.exe"
-    runself=$stage/thprac.exe
-    tried=0
-    appid=$(envof "$TARGET" SteamAppId)
-    [ -n "$appid" ] || appid=$(envof "$TARGET" SteamGameId)
-    pfx=$(envof "$TARGET" WINEPREFIX)
-    if [ -z "$lclient" ]; then lclient=$(find_launch_client 2>/dev/null || true); fi
-    if [ -n "$lclient" ] && [ -n "$appid" ]; then
-      tried=1
-      dbg "   try launch-client inside-app=$appid path=$lclient"
-      "$lclient" --inside-app="$appid" --directory=/ \
-        --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
-        -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
-      rc=$?
-      dbg "   launch-client(inside-app) rc=$rc"
-      if [ "$rc" != 0 ]; then
-        dbg "   try launch-client bus-name app=$appid path=$lclient"
-        "$lclient" --bus-name="com.steampowered.App$appid" --directory=/ \
-          --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
-          -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
-        rc=$?
-        dbg "   launch-client(bus-name) rc=$rc"
-      fi
-      if [ "$rc" != 0 ] && [ "$lclient" != "steam-runtime-launch-client" ] && command -v steam-runtime-launch-client >/dev/null 2>&1; then
-        dbg "   retry with steam-runtime-launch-client from PATH (inside-app)"
-        steam-runtime-launch-client --inside-app="$appid" --directory=/ \
-          --env="WINEPREFIX=$pfx" --env="THPRAC_WINE_LOCAL_ONLY=1" \
-          -- "$loader" "$runself" --attach >> "$OUT.log" 2>&1
-        rc=$?
-        dbg "   launch-client(PATH,inside-app) rc=$rc"
-      fi
-    fi
-    if [ "$rc" != 0 ] && command -v nsenter >/dev/null 2>&1; then
-      tried=1
-      dbg "   try nsenter"
-      if nsv=$(pick_nsenter "$TARGET"); then
-        dbg "   nsenter options: [$nsv]"
-        LOADER=$loader; RUNSELF=$runself; export LOADER RUNSELF
-        nsenter -t "$TARGET" $nsv xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" env -u WINESERVERSOCKET THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
-          < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
-        rc=$?
-        dbg "   nsenter rc=$rc"
-        if [ "$rc" != 0 ]; then
-          # Try with an explicit wineserver socket inside the target container.
-          sock=$(ls -1t "/proc/$TARGET/root/tmp/.wine-$UID"/server-*/socket 2>/dev/null | head -n 1)
-          if [ -n "$sock" ]; then
-            sock_in=${sock#"/proc/$TARGET/root"}
-            dbg "   retry nsenter with WINESERVERSOCKET=$sock_in"
-            nsenter -t "$TARGET" $nsv xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" WINESERVERSOCKET='"$sock_in"' THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
-              < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
-            rc=$?
-            dbg "   nsenter(socket) rc=$rc"
-          fi
-        fi
-      else
-        dbg "   nsenter: cannot enter the container (no option set worked)"
-      fi
-    fi
-    if [ "$tried" = 0 ]; then
-      echo "ERR neither steam-runtime-launch-client nor nsenter is usable" >> "$OUT"
-    fi
-  else
-    LOADER=$loader; RUNSELF=$runself; export LOADER RUNSELF
-    xargs -0 sh -c 'unset LD_PRELOAD LD_PRELOAD_64 LD_LIBRARY_PATH STEAM_COMPAT_LAUNCHER_SERVICE; exec env -i "$@" env -u WINESERVERSOCKET THPRAC_WINE_LOCAL_ONLY=1 "$LOADER" "$RUNSELF" --attach' sh \
-      < "/proc/$TARGET/environ" >> "$OUT.log" 2>&1
-    rc=$?
-    dbg "   direct rc=$rc"
-  fi
-  echo "RC $rc" >> "$OUT"
-fi
-
-echo DONE >> "$OUT"
-)SH";
 
 bool HasDone(const std::string& out) {
     return out == "DONE\n" || out.find("\nDONE\n") != std::string::npos;
@@ -494,26 +151,13 @@ struct ScriptResult {
 
 bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, ScriptResult& result,
     const std::string& extraVars = std::string()) {
-    wchar_t tmp[MAX_PATH + 1] = {};
-    DWORD n = GetTempPathW(MAX_PATH, tmp);
-    if (!n || n > MAX_PATH) {
-        DebugLog("GetTempPathW failed");
+    (void)extraVars;
+    std::wstring dir = LogDirectory();
+    if (dir.empty()) {
+        DebugLog("LogDirectory failed");
         return false;
     }
-    // Fresh prefixes (e.g. Proton) may not have the Temp directory yet.
-    std::wstring dir(tmp, n);
-    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        CreateDirectoryW(dir.c_str(), nullptr);
-    }
-    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        wchar_t appdata[MAX_PATH] = {};
-        DWORD m = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-        if (m && m < MAX_PATH) {
-            dir = std::wstring(appdata) + L"\\thprac\\";
-        }
-    }
     std::wstring base = dir + L"thprac_xattach_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
-    std::wstring scriptW = base + L".sh";
     std::wstring outW = base + L".out";
     std::wstring logW = base + L".out.log";
 
@@ -522,54 +166,49 @@ bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, Scrip
         DebugLog("GetModuleFileNameW failed");
         return false;
     }
-
+    std::wstring folder;
+    if (!THPrac::NativeBundle::PrepareFolder(folder)) {
+        DebugLog("cannot extract native Unix helper from bundle");
+        return false;
+    }
+    std::wstring helperW = folder + L"\\" + THPrac::NativeBundle::XAttachName;
+    if (GetFileAttributesW(helperW.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        DebugLog("native Unix helper missing: " + utf16_to_utf8(helperW.c_str()));
+        return false;
+    }
     if (!WriteAll(outW, "")) {
-        DebugLog("cannot create temp file in " + utf16_to_utf8(tmp));
+        DebugLog("cannot create temp file in " + utf16_to_utf8(dir.c_str()));
         return false;
     }
     std::string outU = ToUnixPath(outW);
+    std::string logU = ToUnixPath(logW);
     std::string selfU = ToUnixPath(self);
-    DebugLog(std::string("[") + mode + "] out=" + outU + " self=" + selfU);
-    if (outU.empty() || selfU.empty()) {
+    std::string helperU = ToUnixPath(helperW);
+    DebugLog(std::string("[") + mode + "] out=" + outU + " self=" + selfU + " helper=" + helperU);
+    if (outU.empty() || logU.empty() || selfU.empty() || helperU.empty()) {
         DebugLog("cannot translate paths to Unix form; cross-prefix attach unavailable");
         DeleteFileW(outW.c_str());
         return false;
     }
-
-    std::string script = "MODE=" + ShellQuote(mode)
-        + "\nOUT=" + ShellQuote(outU)
-        + "\nSELF=" + ShellQuote(selfU)
-        + "\nTARGET=" + std::to_string(target)
-        + "\nNEEDNS=" + (needNs ? "1" : "0")
-        + "\n" + extraVars
-        + "\n" + kScriptBody;
-    if (!WriteAll(scriptW, script)) {
-        DebugLog("cannot write helper script");
-        DeleteFileW(outW.c_str());
-        return false;
-    }
-    std::string scriptU = ToUnixPath(scriptW);
-
-    std::wstring sh = ToDosPath("/bin/sh");
-    std::wstring cmd = L"\"" + sh + L"\" \"" + utf8_to_utf16(scriptU.c_str()) + L"\"";
+    std::wstring helperDos = ToDosPath(helperU);
+    std::wstring cmd = L"\"" + helperDos + L"\" " + utf8_to_utf16(mode) + L" \"" + utf8_to_utf16(helperU.c_str())
+        + L"\" \"" + utf8_to_utf16(outU.c_str()) + L"\" \"" + utf8_to_utf16(logU.c_str())
+        + L"\" \"" + utf8_to_utf16(selfU.c_str()) + L"\" "
+        + std::to_wstring(target) + L" " + (needNs ? L"1" : L"0")
+        + (extraVars.find("HOST_DISPATCH=1") != std::string::npos ? L" --host" : L"");
     DebugLog("cmd: " + utf16_to_utf8(cmd.c_str()));
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
-    bool started = !scriptU.empty() && CreateProcessW(sh.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+    bool started = CreateProcessW(helperDos.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+        nullptr, nullptr, &si, &pi);
     if (!started) {
-        DebugLog("CreateProcessW(/bin/sh) failed, error " + std::to_string(GetLastError()));
+        DebugLog("CreateProcessW(native helper) failed, error " + std::to_string(GetLastError()));
     } else {
         DWORD start = GetTickCount();
         for (;;) {
-            if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) {
-                break;
-            }
-            // The script's last line is DONE, in case waiting on a native
-            // process is unreliable on this Wine build.
-            if (HasDone(ReadAll(outW))) {
-                break;
-            }
+            if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) break;
+            if (HasDone(ReadAll(outW))) break;
             if (GetTickCount() - start > timeoutMs) {
                 DebugLog("helper timed out");
                 break;
@@ -582,12 +221,9 @@ bool RunScript(const char* mode, int target, bool needNs, DWORD timeoutMs, Scrip
     result.out = ReadAll(outW);
     result.log = ReadAll(logW);
     result.done = HasDone(result.out);
-    if (!result.log.empty()) {
-        DebugLog("helper log:\n" + result.log);
-    }
+    if (!result.log.empty()) DebugLog("helper log:\n" + result.log, true);
     DebugLog(std::string("[") + mode + "] done=" + (result.done ? "1" : "0") + " started=" + (started ? "1" : "0")
-        + " output bytes=" + std::to_string(result.out.size()));
-    DeleteFileW(scriptW.c_str());
+        + " output bytes=" + std::to_string(result.out.size()), true);
     DeleteFileW(outW.c_str());
     DeleteFileW(logW.c_str());
     return started && result.done;
@@ -696,32 +332,47 @@ static const char* KnownSteamAppId(THGameID wanted) {
 // the host fails with EPERM). For games with a known AppID the attach helper
 // can instead be dispatched straight into the game's own container via
 // steam-runtime-launch-client, where the local wineserver sees the game.
-static bool TryInnerAppAttach(THGameID wanted, bool prompt, const char* steamAppId) {
+// Returns 1 when a game was attached, 0 when the helper ran cleanly but no
+// game appeared within its wait window, -1 when the dispatch itself failed.
+static int TryInnerAppAttach(THGameID wanted, bool prompt, const char* steamAppId) {
     const char* appId = (steamAppId && *steamAppId) ? steamAppId : KnownSteamAppId(wanted);
     if (!appId) {
         return false;
     }
+    char normalizedAppId[24];
+    // Normalize a 64-bit shortcut GameID down to its 32-bit AppID.
+    {
+        unsigned long long v = strtoull(appId, nullptr, 10);
+        if (v > 0xFFFFFFFFull) {
+            snprintf(normalizedAppId, sizeof(normalizedAppId), "%llu", v >> 32);
+            appId = normalizedAppId;
+        }
+    }
     DebugLog(std::string("no scan candidates; dispatching attach into app container ") + appId, true);
-    // The dispatched helper waits up to 60s for the game to appear
+    // The dispatched helper waits for the target Wine process, then up to 60s
+    // for the game to become attachable.
     // (THPRAC_ATTACH_WAIT), so one dispatch covers the whole launch window.
     ScriptResult inner;
-    if (!RunScript("apply_inner", 0, false, 90000, inner, std::string("INNERAPP=") + appId)) {
+    if (!RunScript("apply_inner", 0, false, 150000, inner, std::string("INNERAPP=") + appId)) {
         DebugLog("apply_inner: script failed to start/complete", true);
-        return false;
+        return -1;
     }
-    bool success = false;
+    int status = -1;
     for (const auto& line : SplitLines(inner.out)) {
         if (line == "RC 0") {
-            success = true;
+            status = 1;
+        } else if (line == "RC 1") {
+            // The helper ran, waited for the game and timed out without one.
+            if (status < 0) status = 0;
         } else if (line.rfind("ERR ", 0) == 0) {
             DebugLog(line.substr(4));
         }
     }
-    DebugLog(std::string("apply_inner result: success=") + (success ? "1" : "0"), true);
-    if (success && prompt) {
+    DebugLog(std::string("apply_inner result: status=") + std::to_string(status), true);
+    if (status == 1 && prompt) {
         log_mbox(0, MB_ICONASTERISK | MB_OK, S(THPRAC_PR_COMPLETE), S(THPRAC_PR_INFO_ATTACHED));
     }
-    return success;
+    return status;
 }
 
 static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, bool* prompted, const char* steamAppId) {
@@ -738,20 +389,14 @@ static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, b
     }
     DebugLog(std::string("AttachOtherPrefixes wanted=") + std::to_string((int)wanted) + " manual=" + (manual ? "1" : "0") + " prompt=" + (prompt ? "1" : "0"), true);
 
-    // The dispatch into the game's own container hooks immediately (the helper
-    // waits there for the game to appear), so prefer it whenever the Steam
-    // AppID is known. Inside a Proton container the plain scan is also blind
-    // (other containers' /proc entries are unreadable) and takes >15s.
-    const char* appId = (steamAppId && *steamAppId) ? steamAppId : KnownSteamAppId(wanted);
-    if (appId) {
-        bool handled = TryInnerAppAttach(wanted, prompt, appId);
-        if (handled) {
-            return handled;
-        }
-    }
+    // Inside a Proton container the launcher cannot read other containers'
+    // /proc entries, but the --alongside-steam service can run the helper on
+    // the host, where the scan sees all wineservers and the apply can enter
+    // the game's container. The inner dispatch is done by the script itself.
+    const std::string extraVars = IsProtonContainer() ? "HOST_DISPATCH=1" : "";
 
     ScriptResult scan;
-    if (!RunScript("scan", 0, false, 15000, scan)) {
+    if (!RunScript("scan", 0, false, 15000, scan, extraVars)) {
         DebugLog("scan failed to start/complete", true);
         return false;
     }
@@ -793,7 +438,7 @@ static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, b
 
         DebugLog("applying to " + c.name + " (pid " + std::to_string(c.pid) + ") in Wine prefix " + prefix + (c.otherNs ? " [other namespace]" : ""));
         ScriptResult apply;
-        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply);
+        bool ran = RunScript("apply", c.pid, c.otherNs, 120000, apply, extraVars);
 
         bool success = false;
         for (const auto& line : SplitLines(apply.out)) {
@@ -809,7 +454,7 @@ static bool AttachOtherPrefixesSync(THGameID wanted, bool manual, bool prompt, b
             }
         } else {
             if (prompted) *prompted = true;
-            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
+            if (prompt) log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_PR_ERR_ATTACH));
         }
     }
     if (!handled) DebugLog("no cross-prefix game handled", true);
@@ -827,10 +472,11 @@ struct AsyncScanArgs {
 static DWORD WINAPI AsyncAttachThread(LPVOID param) {
     auto* args = static_cast<AsyncScanArgs*>(param);
     THGameID wanted = args->wanted;
+    std::string steamAppId = args->steamAppId;
     delete args;
 
     bool dummyPrompted = false;
-    bool success = AttachOtherPrefixesSync(wanted, false, false, &dummyPrompted, args->steamAppId.c_str());
+    bool success = AttachOtherPrefixesSync(wanted, false, false, &dummyPrompted, steamAppId.c_str());
     if (success) {
         g_asyncSuccess.store(true, std::memory_order_release);
     }
@@ -874,6 +520,93 @@ bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompt
     }
 
     return AttachOtherPrefixesSync(wanted, manual, prompt, prompted, steamAppId);
+}
+
+// ---------------------------------------------------------------------------
+// Ongoing-game watcher.
+//
+// The launcher only auto-attaches games it started itself
+// (state->reflectiveLaunchID). A game launched directly through Steam ("steam
+// steam://rungameid/...") never sets that state, so it would stay unhooked:
+// the startup search happens once before the game runs, and a plain scan
+// cannot see other Steam containers from inside a pressure-vessel sandbox.
+// While the launcher is open, this watcher keeps one attach helper resident in
+// each configured game's own container; the helper attaches the game as soon
+// as it appears. Silent by design: no prompts and no success/failure dialogs.
+// One attempt per container runs at a time; entries are never removed, so a
+// WatchState pointer stays valid for the lifetime of the process.
+// ---------------------------------------------------------------------------
+struct WatchState {
+    std::atomic<bool> busy{ false };
+    std::atomic<ULONGLONG> next{ 0 };
+};
+struct WatchArgs {
+    THGameID wanted;
+    std::string appId;
+    WatchState* state;
+};
+static std::atomic<int> g_watchActive{ 0 };
+static std::mutex g_watchersMutex;
+static std::map<std::string, WatchState*> g_watchers;
+
+static DWORD WINAPI WatchThread(LPVOID param) {
+    auto* a = static_cast<WatchArgs*>(param);
+    // Blocks up to ~90s inside the game's container (the helper waits there
+    // for the game to appear); the launcher UI is not affected.
+    bool handled = AttachOtherPrefixesSync(a->wanted, false, false, nullptr, a->appId.c_str());
+    int status = handled ? 1 : 0;
+    ULONGLONG retry = GetTickCount64()
+        + (status == 1 ? 60000  // attached; re-check after a pause
+            : status == 0 ? 1000 // clean wait; stay resident
+            : 15000);            // dispatch failed; back off before retrying
+    a->state->next.store(retry, std::memory_order_release);
+    a->state->busy.store(false, std::memory_order_release);
+    g_watchActive.fetch_sub(1, std::memory_order_release);
+    delete a;
+    return 0;
+}
+
+bool WatchOngoingGame(THGameID wanted, const std::string& appId) {
+    if (appId.empty() || !IsWine()) {
+        return false;
+    }
+    if (GetEnvironmentVariableW(L"THPRAC_WINE_LOCAL_ONLY", nullptr, 0) > 0) {
+        return false;
+    }
+    if (g_watchActive.load(std::memory_order_acquire) >= 4) {
+        return false; // keep the number of resident helpers bounded
+    }
+    WatchState* state = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_watchersMutex);
+        auto& entry = g_watchers[appId];
+        if (!entry) entry = new WatchState();
+        state = entry;
+    }
+    ULONGLONG now = GetTickCount64();
+    if (now < state->next.load(std::memory_order_acquire)) {
+        return false;
+    }
+    bool expected = false;
+    if (!state->busy.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return false;
+    }
+
+    auto* args = new WatchArgs{ wanted, appId, state };
+    HANDLE hThread = CreateThread(nullptr, 0, WatchThread, args, 0, nullptr);
+    if (hThread) {
+        CloseHandle(hThread);
+        g_watchActive.fetch_add(1, std::memory_order_release);
+    } else {
+        delete args;
+        state->busy.store(false, std::memory_order_release);
+        state->next.store(now + 15000, std::memory_order_release);
+    }
+    return true;
+}
+
+bool WatchOngoingNcGame() {
+    return WatchOngoingGame(ID_TH06NC, "4659620");
 }
 
 }

@@ -1,8 +1,8 @@
 #pragma once
 
 // Public fork identity. Keep the upstream replay version in thprac_version.h.
-#define THPRAC_FORK_VERSION "1.0.1"
-#define THPRAC_FORK_VERSION_NUMBERS 1,0,1,0
+#define THPRAC_FORK_VERSION "1.0.2"
+#define THPRAC_FORK_VERSION_NUMBERS 1,0,2,0
 // thprac-th06nc (New Classic) practice plugin version, shown in About.
 #define THPRAC_NC_VERSION "1.1.1"
 #define THPRAC_FORK_REPOSITORY "https://github.com/Madotsukanai/thprac-linux"

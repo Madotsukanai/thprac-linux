@@ -35,33 +35,15 @@ inline std::wstring ExtractSteamUrl(const std::wstring& cmd) {
     return cmd.substr(at, end - at);
 }
 
-// Run a command through /bin/sh via the Z: drive mapping.
+// Run a command through the embedded static ELF helper (no /bin/sh).
 inline bool RunShellCommand(const wchar_t* command) {
-    std::wstring escaped;
-    for (auto c = command; *c; ++c) {
-        if (*c == L'"') {
-            escaped += L"\\\"";
-        } else {
-            escaped += *c;
-        }
-    }
-    std::wstring params = L"-c \"" + escaped + L"\"";
-    STARTUPINFOW si{sizeof(si)};
-    PROCESS_INFORMATION pi{};
-    std::wstring fullCmd = L"\"Z:\\bin\\sh\" " + params;
-    if (CreateProcessW(L"Z:\\bin\\sh", fullCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return true;
-    }
-    // ShellExecuteW resolves the Unix binary through the Z: drive mapping.
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"Z:\\bin\\sh", params.c_str(), nullptr, SW_HIDE);
-    return (INT_PTR)result > 32;
+    return THPrac::NativeBundle::RunUnixCommand(command, L"async", 0);
 }
 
 // Run a host-side shell command from a Wine/Proton process (ntdll exports
 // wine_get_version there, and Z: is mapped to the container root). The
-// command is handed to /bin/sh -c, so pipes, redirections and env vars work.
+// commands are executed by the native Unix helper, with quote-aware command
+// lines and "||" fallbacks supported there.
 // steam:// URLs are special-cased: inside a Proton container they must be
 // dispatched to the host Steam client (Steam itself does this through
 // `steam-runtime-launch-client --alongside-steam -- xdg-open ...`).

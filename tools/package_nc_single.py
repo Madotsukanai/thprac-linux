@@ -12,6 +12,7 @@ FILES = [
     'licenses/FreeType-LICENSE.txt', 'licenses/FreeType-FTL.txt',
     'licenses/MinHook.txt', 'licenses/ImGui.txt',
     'THIRD_PARTY_NOTICES.txt',
+    'thprac-xattach',
 ]
 
 def package_windows(launcher, files, bundle_id, output):

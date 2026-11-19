@@ -1,4 +1,7 @@
 #include "thprac_update.h"
+#include "thprac_native_bundle.h"
+#include "thprac_attach_log.h"
+#include "thprac_log_dir.h"
 #include "thprac_fork.h"
 #include "thprac_gui_locale.h"
 #include "thprac_utils.h"
@@ -9,6 +12,7 @@
 #include <yyjson.h>
 #include <string.h>
 #include <wininet.h>
+#include <bcrypt.h>
 
 namespace THPrac {
 
@@ -32,6 +36,7 @@ struct UpdateData {
     CRITICAL_SECTION cs;
     std::string version;
     std::string assetUrl;
+    std::string assetHash; // hex SHA-256 from the Releases asset digest
 };
 UpdateData gUpdate;
 
@@ -77,29 +82,53 @@ std::string ToUnixPath(const std::wstring& dosPath) {
     return {};
 }
 
-// Run a command through /bin/sh (Wine starts non-PE executables natively).
+static std::wstring utf8ToHexWide(const std::string& hex) {
+    std::wstring wide;
+    for (char c : hex) wide.push_back(wchar_t((unsigned char)c));
+    return wide;
+}
+
+// Compute the SHA-256 of a file as lowercase hex. Used to verify the
+// downloaded update against the digest published on the Releases asset.
+std::string FileSha256(const std::wstring& path) {
+    BCRYPT_ALG_HANDLE algorithm{};
+    BCRYPT_HASH_HANDLE hash{};
+    std::string result;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return {};
+    if (BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) < 0) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return {};
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    bool ok = file != INVALID_HANDLE_VALUE;
+    if (ok) {
+        std::vector<unsigned char> buffer(65536);
+        DWORD got = 0;
+        while (true) {
+            if (!ReadFile(file, buffer.data(), DWORD(buffer.size()), &got, nullptr)) { ok = false; break; }
+            if (!got) break;
+            if (BCryptHashData(hash, buffer.data(), got, 0) < 0) { ok = false; break; }
+        }
+        CloseHandle(file);
+    }
+    unsigned char digest[32]{};
+    if (ok && BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0) ok = false;
+    if (ok) {
+        static const char hex[] = "0123456789abcdef";
+        result.reserve(64);
+        for (unsigned char c : digest) { result.push_back(hex[c >> 4]); result.push_back(hex[c & 15]); }
+    }
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return result;
+}
+
+// Run a Unix command via the embedded static ELF helper (no /bin/sh).
 bool RunSh(const std::string& commandUtf8) {
-    std::wstring escaped;
-    for (char c : commandUtf8) {
-        wchar_t w = (wchar_t)(unsigned char)c;
-        if (w == L'"') escaped += L"\\\"";
-        else escaped += w;
-    }
-    std::wstring shCmd = L"\"Z:\\bin\\sh\" -c \"" + escaped + L"\"";
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {};
-    bool started = CreateProcessW(L"Z:\\bin\\sh", shCmd.data(), nullptr, nullptr, FALSE,
-        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    if (!started) return false;
-    // Wait at most 5 minutes for the transfer to finish.
-    if (WaitForSingleObject(pi.hProcess, 300000) != WAIT_OBJECT_0) {
-        TerminateProcess(pi.hProcess, 1);
-    }
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return code == 0;
+    std::wstring wide;
+    for (unsigned char c : commandUtf8) wide.push_back(wchar_t(c));
+    return THPrac::NativeBundle::RunUnixCommand(wide.c_str(), L"wait", 300000);
 }
 
 bool HttpGetWininet(const char* url, std::string& out) {
@@ -172,7 +201,8 @@ bool HttpGetCurl(const char* url, std::string& out) {
     if (unixPath.empty()) return false;
     std::string cmd = std::string("curl -sL --fail -m 120 '") + url + "' -o '" + unixPath +
         "' || wget -q -T 120 -O '" + unixPath + "' '" + url + "'";
-    if (!RunSh(cmd)) return false;
+    if (!RunSh(cmd)) { THPrac::AttachLog("HttpGetCurl failed: %s", cmd.c_str()); return false; }
+    THPrac::AttachLog("HttpGetCurl ok: %s", cmd.c_str());
     HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size = {};
@@ -195,6 +225,7 @@ bool HttpDownloadCurl(const char* url, const std::wstring& path) {
     std::string cmd = std::string("curl -sL --fail -m 600 '") + url + "' -o '" + unixPath +
         "' || wget -q -T 600 -O '" + unixPath + "' '" + url + "'";
     if (!RunSh(cmd)) {
+        THPrac::AttachLog("HttpDownloadCurl failed: %s", cmd.c_str());
         DeleteFileW(path.c_str());
         return false;
     }
@@ -216,7 +247,7 @@ bool HttpDownload(const char* url, const std::wstring& path) {
     return HttpDownloadCurl(url, path);
 }
 
-bool ParseLatestRelease(const std::string& json, std::string& version, std::string& url) {
+bool ParseLatestRelease(const std::string& json, std::string& version, std::string& url, std::string& hash) {
     yyjson_doc* doc = yyjson_read(json.c_str(), json.size(), 0);
     if (!doc) return false;
     yyjson_val* root = yyjson_doc_get_root(doc);
@@ -234,21 +265,26 @@ bool ParseLatestRelease(const std::string& json, std::string& version, std::stri
     yyjson_val* item;
     size_t idx, max;
     const char* fallback = nullptr;
+    std::string fallbackHash;
     yyjson_arr_foreach(assets, idx, max, item) {
         const char* name = yyjson_get_str(yyjson_obj_get(item, "name"));
         const char* download = yyjson_get_str(yyjson_obj_get(item, "browser_download_url"));
         if (!name || !download) continue;
+        const char* digest = yyjson_get_str(yyjson_obj_get(item, "digest"));
+        std::string assetHash;
+        if (digest && strncmp(digest, "sha256:", 7) == 0) assetHash = digest + 7;
         size_t len = strlen(name);
         if (len >= 4 && _stricmp(name + len - 4, ".exe") == 0) {
             if (!_stricmp(name, "thprac-linux.exe")) {
                 url = download;
+                hash = assetHash;
                 break;
             }
-            if (!fallback) fallback = download;
+            if (!fallback) { fallback = download; fallbackHash = assetHash; }
         }
     }
     yyjson_doc_free(doc);
-    if (url.empty() && fallback) url = fallback;
+    if (url.empty() && fallback) { url = fallback; hash = fallbackHash; }
     return !url.empty();
 }
 
@@ -261,14 +297,20 @@ bool NewerThanCurrent(const std::string& tag) {
 DWORD WINAPI CheckThread(LPVOID) {
     std::string json, version, url;
     int state = UPDATE_FAILED;
-    if (HttpGet(API_LATEST, json) && ParseLatestRelease(json, version, url)) {
+    std::string hash;
+    if (HttpGet(API_LATEST, json) && ParseLatestRelease(json, version, url, hash)) {
         state = NewerThanCurrent(version) ? UPDATE_AVAILABLE : UPDATE_CURRENT;
+        THPrac::AttachLog("update check: version=%s state=%d url=%s", version.c_str(), state, url.c_str());
+    } else {
+        THPrac::AttachLog("update check failed: json bytes=%zu", json.size());
     }
     UpdateLock();
     gUpdate.state = state;
     if (state == UPDATE_AVAILABLE) {
         gUpdate.version = version;
         gUpdate.assetUrl = url;
+        gUpdate.assetHash = hash;
+        THPrac::AttachLog("update check: hash=%s", hash.c_str());
     }
     gUpdate.threadRunning = false;
     UpdateUnlock();
@@ -284,29 +326,58 @@ DWORD WINAPI DownloadThread(LPVOID) {
     std::wstring exe = ExePath();
     std::wstring staged = exe + L".update";
     UpdateSetState(UPDATE_DOWNLOADING);
+    std::string expectedHash;
+    {
+        UpdateLock();
+        expectedHash = gUpdate.assetHash;
+        UpdateUnlock();
+    }
     bool ok = !url.empty() && HttpDownload(url.c_str(), staged);
+    if (ok && !expectedHash.empty()) {
+        std::string actualHash = FileSha256(staged);
+        THPrac::AttachLog("update hash: expected=%s actual=%s", expectedHash.c_str(), actualHash.c_str());
+        if (actualHash.empty() || actualHash.size() != expectedHash.size() ||
+            strcasecmp(actualHash.c_str(), expectedHash.c_str()) != 0) {
+            THPrac::AttachLog("update hash mismatch");
+            log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_UPDATE_HASH_MISMATCH));
+            ok = false;
+        }
+    }
     if (ok) {
-        // Replace the running executable: renaming a running image is allowed.
+        // Hand the swap and relaunch to the native Unix helper: Wine reuses the
+        // old image (and its single-instance window) when a running exe is
+        // replaced and re-launched in-process. The helper waits for this
+        // process to exit before swapping the files and starting the new build.
+        std::wstring helper;
+        std::string exeUnix = ToUnixPath(exe), stagedUnix = ToUnixPath(staged);
         std::wstring oldPath = exe + L".old";
-        DeleteFileW(oldPath.c_str());
-        if (MoveFileExW(exe.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING) &&
-            MoveFileExW(staged.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-            // Relaunch and exit so the new build takes over.
-            std::wstring cmd = L"\"" + exe + L"\"";
+        std::string oldUnix = ToUnixPath(oldPath);
+        if (THPrac::NativeBundle::XAttachPath(helper) && !exeUnix.empty() &&
+            !stagedUnix.empty() && !oldUnix.empty()) {
+            auto hexOf = [](const std::string& u) {
+                std::wstring wide;
+                for (unsigned char c : u) wide.push_back(wchar_t(c));
+                return THPrac::NativeBundle::HexEncode(wide);
+            };
+            std::wstring logDir = LogDirectory();
+            std::wstring logPath = (logDir.empty() ? std::wstring(L"C:\\") : logDir + L"\\") +
+                L"thprac_update_" + std::to_wstring(GetCurrentProcessId()) + L".log";
+            std::wstring cmd = L"\"" + helper + L"\" update \"" + logPath + L"\" "
+                + utf8ToHexWide(hexOf(exeUnix)) + L" " + utf8ToHexWide(hexOf(stagedUnix))
+                + L" " + utf8ToHexWide(hexOf(oldUnix)) + L" " + std::to_wstring(GetCurrentProcessId());
             STARTUPINFOW si = { sizeof(si) };
             PROCESS_INFORMATION pi = {};
-            if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+            if (CreateProcessW(helper.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                               nullptr, nullptr, &si, &pi)) {
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
                 ExitProcess(0);
             }
-            // Relaunch failed: restore the old build.
-            DeleteFileW(exe.c_str());
-            MoveFileExW(oldPath.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);
-            ok = false;
+            THPrac::AttachLog("update helper start failed err=%lu", (unsigned long)GetLastError());
         } else {
-            ok = false;
+            THPrac::AttachLog("update helper or unix paths unavailable");
         }
+        ok = false;
     }
     if (!ok) DeleteFileW(staged.c_str());
     UpdateLock();

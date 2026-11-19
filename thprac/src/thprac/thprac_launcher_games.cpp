@@ -411,7 +411,19 @@ static std::string SteamAppIdFromCommand(const std::string& command) {
             ++end;
         }
         if (end > begin) {
-            return command.substr(begin, end - begin);
+            std::string id = command.substr(begin, end - begin);
+            // Steam shortcuts use 64-bit GameIDs in rungameid/ URLs (the
+            // 32-bit AppID sits in the high half). launch-client and the
+            // compatdata paths need the plain AppID.
+            if (id.size() > 10) {
+                unsigned long long v = strtoull(id.c_str(), nullptr, 10);
+                if (v > 0xFFFFFFFFull) {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%llu", v >> 32);
+                    return buf;
+                }
+            }
+            return id;
         }
     }
     return {};
@@ -451,6 +463,7 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
                 return false;
             }
             state->reflectiveLaunchID = game;
+            state->reflectiveLaunchStart = GetTickCount64();
             state->reflectiveAppId = "4659620";
             return true;
         }
@@ -462,12 +475,17 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
             // and hook thprac into the game once its process shows up.
             if (inst->apply_thprac) {
                 state->reflectiveLaunchID = game;
+                state->reflectiveLaunchStart = GetTickCount64();
                 state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
+                state->reflectivePatchFlags =
+                    (inst->allow_oilp ? RUN_FLAG_OILP : 0) | (inst->allow_vpatch ? RUN_FLAG_VPATCH : 0);
             }
             if (!RunLaunchCommand(utf8_to_utf16(inst->path).c_str())) {
                 if (inst->apply_thprac) {
                     state->reflectiveLaunchID = ID_UNKNOWN;
+            state->reflectiveLaunchStart = 0;
                     state->reflectiveAppId.clear();
+                    state->reflectivePatchFlags = 0;
                 }
                 log_mbox(0, MB_ICONERROR | MB_OK, S(THPRAC_PR_ERROR), S(THPRAC_GAMES_COMMAND_FAILED));
                 return false;
@@ -490,7 +508,10 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
         else {
             if (inst->apply_thprac) {
                 state->reflectiveLaunchID = game;
+                state->reflectiveLaunchStart = GetTickCount64();
                 state->reflectiveAppId = SteamAppIdFromCommand(inst->path ? inst->path : "");
+                state->reflectivePatchFlags =
+                    (inst->allow_oilp ? RUN_FLAG_OILP : 0) | (inst->allow_vpatch ? RUN_FLAG_VPATCH : 0);
             }
             // Steam entries hold steam:// URLs; dispatch them through the
             // shared runner so containerized launchers can reach the host
@@ -505,6 +526,9 @@ static bool LauncherRunGame(LauncherState* state, THGameID game, LauncherInstanc
     } else {
         if (inst->apply_thprac) {
             state->reflectiveLaunchID = game;
+            state->reflectiveLaunchStart = GetTickCount64();
+            state->reflectivePatchFlags =
+                (inst->allow_oilp ? RUN_FLAG_OILP : 0) | (inst->allow_vpatch ? RUN_FLAG_VPATCH : 0);
         }
         return LauncherRunWithThcrap(state->settings.thcrap_dir, utf8_to_utf16(inst->path), game);
     }
@@ -1077,7 +1101,7 @@ static bool DetailsPage(LauncherState* state) {
         ImGui::SameLine();
         Gui::HelpMarker(S(THPRAC_GAMES_LOW_LATENCY_DESC));
     }
-    if (inst->type != TYPE_THCRAP && inst->type != TYPE_STEAM && inst->type != TYPE_COMMAND) {
+    if (inst->type != TYPE_THCRAP && inst->type != TYPE_STEAM) {
         if (ver->has_oilp) {
             ImGui::Checkbox(S(THPRAC_GAMES_USE_OILP), &inst->allow_oilp);
             ImGui::SameLine();
@@ -1096,6 +1120,7 @@ static bool DetailsPage(LauncherState* state) {
     if (state->reflectiveLaunchID == game->id) {
         if (LargeBottomButton(S(THPRAC_GAMES_LAUNCH_ABORT_WAIT), 64.0f)) {
             state->reflectiveLaunchID = ID_UNKNOWN;
+            state->reflectiveLaunchStart = 0;
             state->reflectiveAppId.clear();
             state->closeAfterLaunch = false;
         }
@@ -2002,6 +2027,30 @@ void ThcrapAddConfigsUI(LauncherState* state) {
     }
 }
 
+// While the launcher is open, keep background attach helpers resident in the
+// Steam containers of every configured instance launched through Steam
+// (TYPE_STEAM entries and TYPE_COMMAND entries with a rungameid/-applaunch
+// command). Games started outside the launcher via those commands would
+// otherwise never be seen: the plain scan is blind across pressure-vessel
+// containers. th06nc is always watched (its Steam container is known even
+// without a configured instance).
+void LauncherWatchOngoingGames(LauncherState* state) {
+    (void)state;
+    WineAttach::WatchOngoingNcGame();
+    for (auto& game : gamesAll) {
+        for (size_t i = 0; i < game.inst_count; ++i) {
+            auto& inst = game.instances[i];
+            if (!inst.apply_thprac || (inst.type != TYPE_STEAM && inst.type != TYPE_COMMAND)) {
+                continue;
+            }
+            std::string appId = SteamAppIdFromCommand(inst.path ? inst.path : "");
+            if (!appId.empty()) {
+                WineAttach::WatchOngoingGame(game.id, appId);
+            }
+        }
+    }
+}
+
 void LauncherGamesMain(LauncherState* state) {
 	if (state->inScan) {
         state->inScan = ScanForGamesUI(&state->scanCtx, state->settings.apply_thprac_default == APPLY_THPRAC_DEFAULT_OPEN);
@@ -2026,6 +2075,7 @@ void LauncherGamesMain(LauncherState* state) {
             switch (Gui::MultiButtonsFillWindow(0.0f, S(TH_YES), S(TH_NO))) {
             case 0:
                 state->reflectiveLaunchID = ID_UNKNOWN;
+            state->reflectiveLaunchStart = 0;
                 state->reflectiveAppId.clear();
                 state->closeAfterLaunch = false;
             case 1:

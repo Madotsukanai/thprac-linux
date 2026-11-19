@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include "thprac_log_dir.h"
 #include <string>
 #include <vector>
 #include <array>
@@ -121,7 +122,10 @@ inline void DiagWriteLine(const wchar_t* path, const char* text) {
     FILE* f = _wfopen(path, L"ab");
     if (f) { fputs("[dll] ", f); fputs(text, f); fputc('\n', f); fclose(f); }
 }
-inline void DiagLog(const char* msg) { DiagWriteLine(DiagLogName, msg); }
+inline void DiagLog(const char* msg) {
+    std::wstring path = THPrac::LogPath(DiagLogName);
+    DiagWriteLine(path.empty() ? DiagLogName : path.c_str(), msg);
+}
 inline void DiagLogf(const char* fmt, ...) {
     char line[512];
     va_list args; va_start(args, fmt);

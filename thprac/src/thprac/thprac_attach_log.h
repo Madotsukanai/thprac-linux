@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string>
 #include "thprac_log.h"
+#include "thprac_log_dir.h"
 
 namespace THPrac {
 
@@ -14,11 +15,8 @@ inline void AttachLog(const char* fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, va);
     va_end(va);
     log_printf("thprac: attach: %s\n", msg);
-    wchar_t appdata[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) {
-        std::wstring dir = std::wstring(appdata) + L"\\thprac";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        std::wstring path = dir + L"\\wine_attach.log";
+    std::wstring path = LogPath(L"wine_attach.log");
+    if (!path.empty()) {
         HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {

@@ -31,6 +31,21 @@ bool IsWine();
 bool AttachOtherPrefixes(THGameID wanted, bool manual, bool prompt, bool* prompted,
     const char* steamAppId = nullptr);
 
+// Keep a background attach helper resident inside the Steam container of the
+// given game so that it gets thprac applied even when it was started outside
+// the launcher (e.g. "steam steam://rungameid/..." from a terminal or the
+// Steam client). The launcher only watches games it started itself, and a
+// plain scan cannot see other Steam containers from inside a pressure-vessel
+// sandbox. Cheap to call every frame; each container dispatch runs on its own
+// thread, is silent (no prompts or dialogs), and only one attempt per
+// container runs at a time. Returns true while an attempt is in flight for
+// this container.
+bool WatchOngoingGame(THGameID wanted, const std::string& appId);
+
+// Same as WatchOngoingGame for th06nc, whose Steam container is known even
+// without a launcher-configured instance.
+bool WatchOngoingNcGame();
+
 // Launcher game paths are stored as Linux paths so that they stay valid in every
 // Wine prefix (a C:\users\<name>\... path only exists in the prefix it came from).
 // Both functions take and return UTF-8 and return an empty string when the path

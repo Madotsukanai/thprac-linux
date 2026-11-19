@@ -6,6 +6,7 @@
 #include "thprac_load_exe.h"
 #include "thprac_fork.h"
 #include "thprac_update.h"
+#include "thprac_wine_attach.h"
 
 #include <psapi.h>
 
@@ -412,9 +413,30 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
     ImGui::EndTabBar();
 
     if (state->reflectiveLaunchID && FindAndAttach(false, false, state->reflectiveLaunchID,
-            state->reflectiveAppId.empty() ? nullptr : state->reflectiveAppId.c_str())) {
+            state->reflectiveAppId.empty() ? nullptr : state->reflectiveAppId.c_str(),
+            state->reflectivePatchFlags | RUN_FLAG_THPRAC)) {
         state->reflectiveLaunchID = ID_UNKNOWN;
+        state->reflectiveLaunchStart = 0;
         state->reflectiveAppId.clear();
+        state->reflectivePatchFlags = 0;
+    }
+    // If the game never becomes attachable (launch failed, was cancelled, or
+    // no thprac-compatible process appears), stop waiting after a timeout so
+    // the launcher does not stay stuck in the "abort wait" state forever.
+    else if (state->reflectiveLaunchID && state->reflectiveLaunchStart &&
+             GetTickCount64() - state->reflectiveLaunchStart > 120000) {
+        state->reflectiveLaunchID = ID_UNKNOWN;
+        state->reflectiveLaunchStart = 0;
+        state->reflectiveAppId.clear();
+        state->reflectivePatchFlags = 0;
+        state->closeAfterLaunch = false;
+    }
+    // A game started outside the launcher (e.g. "steam steam://rungameid/..."
+    // from the Steam client) never sets reflectiveLaunchID. While no launch is
+    // pending, keep the background watchers running so such games still get
+    // thprac applied.
+    else if (!gSettings.dont_search_ongoing_game) {
+        LauncherWatchOngoingGames(state);
     }
     if (state->reflectiveLaunchID == ID_UNKNOWN && state->closeAfterLaunch) {
         PostQuitMessage(0);
@@ -423,6 +445,7 @@ void UiUpdate(HWND hwnd, LauncherState* state) {
     ImGui::EndChild();
 
     ImGui::End();
+
     ImGui::EndFrame();
     ImGui::Render();
 

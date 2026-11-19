@@ -271,6 +271,11 @@
         "ダウンロードまたはインストールに失敗しました。"
       ],
       "THPRAC_UPDATE_RETRY": [ "重试", "Retry", "再試行" ],
+      "THPRAC_UPDATE_HASH_MISMATCH": [
+        "更新的SHA-256校验失败，已中止安装。请重新下载或稍后重试。",
+        "SHA-256 verification of the update failed; installation aborted. Please download again or retry later.",
+        "更新のSHA-256検証に失敗したためインストールを中止しました。再ダウンロードするか、しばらくしてからお試しください。"
+      ],
       "THPRAC_GAMES_COMMAND_FAILED": [
         "无法执行启动命令。请检查命令是否可以在当前 Wine/Proton 环境下运行。",
         "Failed to execute the launch command. Check that it can run in the current Wine/Proton environment.",

@@ -42,7 +42,7 @@ bool LoadSelf(HANDLE hProcess);
 uintptr_t LoadRemoteLibrary(HANDLE hProcess, const wchar_t* libName);
 bool TryLoadVpatch(HANDLE hProcess, const wchar_t* exeDir);
 bool FindAndAttach(bool prompt_if_no_game, bool prompt_if_yes_game, THGameID id = ID_UNKNOWN,
-    const char* steamAppId = nullptr);
+    const char* steamAppId = nullptr, uint32_t patchFlags = 0);
 std::string PrimaryExeNameForGame(THGameID id);
 bool ApplyToProcById(DWORD pid);
 bool RunGame(const wchar_t* exeFn, wchar_t* cmdLine, uint32_t flags = 0xFFFFFFFF);

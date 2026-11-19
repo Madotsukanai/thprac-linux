@@ -197,9 +197,11 @@ struct LauncherState {
     LauncherGame* selectedGame = nullptr;
     LauncherGame* hoveredGame = nullptr;
     THGameID reflectiveLaunchID = ID_UNKNOWN;
+    ULONGLONG reflectiveLaunchStart = 0; // GetTickCount64() when the wait began
     // Steam AppID parsed from the launch command, used to hand the attach to
     // the game's own container (see WineAttach::AttachOtherPrefixes).
     std::string reflectiveAppId;
+    uint32_t reflectivePatchFlags = 0; // RUN_FLAG_OILP / RUN_FLAG_VPATCH for the pending launch
     LauncherThcrapSelection thcrapSel;
 
     th_glossary_t thcrapError = A0000ERROR_C;
@@ -253,6 +255,10 @@ void LoadGamesJson(LauncherState*);
 void SaveGamesJson();
 
 void LauncherGamesMain(LauncherState*);
+// Keeps background WineAttach watchers running for every configured Steam
+// instance (and th06nc) so games started outside the launcher still get
+// thprac applied.
+void LauncherWatchOngoingGames(LauncherState*);
 void LauncherLinksMain(LauncherState*);
 
 void RandomShotRollUI(LauncherState*);

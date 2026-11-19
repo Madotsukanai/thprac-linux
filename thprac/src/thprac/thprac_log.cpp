@@ -3,6 +3,7 @@
 #include "thprac_cfg.h"
 #include "thprac_log.h"
 #include "thprac_utils.h"
+#include "thprac_log_dir.h"
 
 namespace THPrac {
 namespace Gui {
@@ -51,6 +52,17 @@ int log_mbox(void* hwnd, unsigned int type, const char* caption, const char* tex
 
     if (!hwnd) {
         hwnd = Gui::ImplWin32GetHwnd();
+    }
+    // Under Wine/Proton the launcher is often minimized or behind a
+    // fullscreen game; a modal dialog can end up hidden behind it, leaving
+    // the UI stuck waiting for input on an invisible window. Raise the owner
+    // and mark the dialog topmost so it is always visible.
+    if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) {
+        if (hwnd && IsWindow((HWND)hwnd)) {
+            if (IsIconic((HWND)hwnd)) ShowWindow((HWND)hwnd, SW_RESTORE);
+            SetForegroundWindow((HWND)hwnd);
+        }
+        type |= MB_TOPMOST;
     }
 
     int ret = MessageBoxW((HWND)hwnd, utf8_to_utf16(text).c_str(), utf8_to_utf16(caption).c_str(), type);
@@ -122,16 +134,20 @@ void log_init(bool launcher, bool console) {
 
     if (!_gConfigDirLen) {
         console = MessageBoxW(NULL, ERROR_NO_DATA_DIR_MSG[Gui::LocaleGet()], nullptr, MB_ICONERROR | MB_YESNO) != IDNO;
-        goto past_log_file_open;
-    }
+    } else {
 
     cur_dir = CurrentPeb()->ProcessParameters->CurrentDirectory.DosPath;
     memcpy(cur_dir_backup, cur_dir.Buffer, cur_dir.Length);
     cur_dir_backup[cur_dir.Length / sizeof(wchar_t)] = 0;
 
-    SetCurrentDirectoryW(_gConfigDir);
-    CreateDirectoryW(L"logs", nullptr);
-    SetCurrentDirectoryW(L"logs");
+    std::wstring logDir = LogDirectory();
+    if (!logDir.empty()) {
+        SetCurrentDirectoryW(logDir.c_str());
+    } else {
+        SetCurrentDirectoryW(_gConfigDir);
+        CreateDirectoryW(L"logs", nullptr);
+        SetCurrentDirectoryW(L"logs");
+    }
 
     if (launcher) {
         memcpy(fn_rot_temp_1, fn_rot_launcher, t_strlen(fn_rot_launcher) * sizeof(wchar_t));
@@ -163,6 +179,7 @@ void log_init(bool launcher, bool console) {
         }
     }
 
+    }
 past_log_file_open:
     if (!AttachConsole(GetCurrentProcessId()) && !AttachConsole(ATTACH_PARENT_PROCESS) && console) {
         console = AllocConsole();

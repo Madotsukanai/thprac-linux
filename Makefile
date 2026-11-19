@@ -23,6 +23,8 @@ BIN_BRIDGE := $(BUILD_DIR)/bin/thprac_bridge64.exe
 INTEGRATED_EXE := $(DIST_DIR)/thprac-linux.exe
 INJECTOR_EXE := $(LAUNCHER_BUILD)/payload/thprac-injector
 WINLOADER_DLL := $(LAUNCHER_BUILD)/payload/thprac_wineloader.dll
+XATTACH_ELF  := $(LAUNCHER_BUILD)/payload/thprac-xattach
+HOST_CXX     ?= g++
 
 .PHONY: all clean
 .DEFAULT_GOAL := all
@@ -40,6 +42,10 @@ $(INJECTOR_EXE): tools/thprac_injector.c | $(LAUNCHER_BUILD)
 $(WINLOADER_DLL): thprac/src/thprac/thprac_wineloader.cpp | $(LAUNCHER_BUILD)
 	mkdir -p $(LAUNCHER_BUILD)/payload
 	$(MINGW64_CXX) -O2 -shared -DTHPRAC_WINLOADER -static -static-libgcc -static-libstdc++ -o $@ $< -lkernel32
+
+$(XATTACH_ELF): tools/thprac_xattach.cpp | $(LAUNCHER_BUILD)
+	mkdir -p $(LAUNCHER_BUILD)/payload
+	$(HOST_CXX) -O2 -static -std=c++17 -Wall -o $@ $<
 
 $(BUILD_DIR)/.locale: $(LOC_JSON_EXE) thprac/src/thprac/thprac_games_def.json
 	$(WINE) $(LOC_JSON_EXE) thprac/src/thprac
@@ -78,7 +84,7 @@ LAUNCHER_INCLUDES := -Ithprac/src -Ithprac/src/thprac -Ithprac/src/3rdParties -I
 LAUNCHER_DEFS := -DNOMINMAX -DUNICODE -D_UNICODE -DHAVE_SSE2 -D_CRT_SECURE_NO_WARNINGS -D_WINDOWS -DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -DDISTORM_LIGHT
 LAUNCHER_CXXFLAGS := -std=c++20 -municode -O2 -msse -msse2 -mfpmath=sse -finput-charset=UTF-8 -fexec-charset=UTF-8 -ffunction-sections -fdata-sections -Wno-unknown-pragmas -Wno-attributes -fms-extensions -fpermissive $(LAUNCHER_DEFS) $(LAUNCHER_INCLUDES)
 LAUNCHER_CFLAGS := -O2 -msse -msse2 -mfpmath=sse -finput-charset=UTF-8 -fexec-charset=UTF-8 -ffunction-sections -fdata-sections -Wno-unknown-pragmas $(LAUNCHER_DEFS) $(LAUNCHER_INCLUDES)
-LAUNCHER_LDFLAGS = -static -municode -Wl,--subsystem,windows -Wl,--gc-sections -static-libgcc -static-libstdc++ -L$(FT32_PREFIX)/lib -lfreetype -ld3d9 -lgdi32 -luser32 -lole32 -lcomdlg32 -lshell32 -ladvapi32 -lwininet -lntdll -lpsapi -lversion -limm32 -lwinmm -ldbghelp -luuid -lsetupapi -Wl,-Bstatic -l:libwinpthread.a
+LAUNCHER_LDFLAGS = -static -municode -Wl,--subsystem,windows -Wl,--gc-sections -static-libgcc -static-libstdc++ -L$(FT32_PREFIX)/lib -lfreetype -ld3d9 -lgdi32 -luser32 -lole32 -lcomdlg32 -lshell32 -ladvapi32 -lbcrypt -lwininet -lntdll -lpsapi -lversion -limm32 -lwinmm -ldbghelp -luuid -lsetupapi -Wl,-Bstatic -l:libwinpthread.a
 OBJDUMP32 ?= i686-w64-mingw32-objdump
 
 $(LAUNCHER_BUILD):
@@ -135,7 +141,7 @@ $(FT64_LIB): $(FT64_DIR)/freetype-$(FT_VERSION).tar.xz $(TOOLCHAIN)
 
 all: $(INTEGRATED_EXE)
 
-$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_BRIDGE) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
+$(INTEGRATED_EXE): $(BUILD_DIR)/.locale thprac/thprac.rc tools/launcher_srcs.txt $(LAUNCHER_SRCS) tools/make_payload_rc.py $(FT32_LIB) $(BIN_DLL) $(BIN_BRIDGE) $(XATTACH_ELF) LICENCE THIRD_PARTY_NOTICES.txt | $(LAUNCHER_BUILD) $(DIST_DIR)
 	mkdir -p $(LAUNCHER_BUILD)/payload/licenses $(LAUNCHER_BUILD)/bundle
 	cp $(BIN_DLL) $(LAUNCHER_BUILD)/payload/thprac_th06nc.dll
 	cp $(BIN_BRIDGE) $(LAUNCHER_BUILD)/payload/thprac_bridge64.exe

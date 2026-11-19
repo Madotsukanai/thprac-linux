@@ -1,4 +1,5 @@
 #include "thprac_th06nc.h"
+#include "thprac_native_bundle.h"
 #ifndef THPRAC_TH06NC_BRIDGE
 #include "thprac_th06nc_map.h"
 #endif
@@ -16,7 +17,7 @@ Shared* shared{}; HANDLE mapping{},mutex{}; DWORD targetPid{};
 void log(const std::wstring& text) {
     if(!DiagEnabled())return;
     static std::ofstream* f=nullptr;
-    if(!f){ static std::ofstream fs; std::wstring p=directory(executablePath())+L"\\"+DiagLogName; fs.open(std::string(p.begin(),p.end()), std::ios::app); f=&fs; }
+    if(!f){ static std::ofstream fs; std::wstring p=THPrac::LogPath(DiagLogName); if(p.empty())p=directory(executablePath())+L"\\"+DiagLogName; fs.open(std::string(p.begin(),p.end()), std::ios::app); f=&fs; }
     if(f&&f->is_open()){
         int n=WideCharToMultiByte(CP_UTF8,0,text.c_str(),-1,nullptr,0,nullptr,nullptr);
         std::string u(n>1?n-1:0,'\0'); if(n>1) WideCharToMultiByte(CP_UTF8,0,text.c_str(),-1,u.data(),n,nullptr,nullptr);
@@ -270,9 +271,8 @@ DWORD findGame() {
     if(Process32FirstW(snapshot,&entry))do{if(_wcsicmp(entry.szExeFile,L"th06nc.exe")==0){if(pid){pid=0;break;}pid=entry.th32ProcessID;}}while(Process32NextW(snapshot,&entry));
     CloseHandle(snapshot);return pid;
 }
-// Run a host-side shell command (Wine/Proton/Steam/gamescope, ...) that starts
-// the game. Requires a Unix /bin/sh reachable through the Z: drive, i.e. a
-// Wine/Proton environment. THPRAC_LAUNCH_CMD holds the command in UTF-8.
+// Run a host-side command through the embedded static ELF helper (no /bin/sh).
+// THPRAC_LAUNCH_CMD holds the command in UTF-8.
 bool startViaCommand() {
     auto envCmd=envValue(L"THPRAC_LAUNCH_CMD");
     if(envCmd.empty())return false;
@@ -280,23 +280,10 @@ bool startViaCommand() {
     std::string utf8(n>1?n-1:0,'\0');
     if(n>1)WideCharToMultiByte(CP_UTF8,0,envCmd.c_str(),-1,utf8.data(),n,nullptr,nullptr);
     std::wstring cmd=utf8ToWin(utf8);
-    std::wstring escaped;
-    for(auto c:cmd){if(c==L'"'){escaped+=L"\\\"";}else escaped+=c;}
-    log(L"startViaCommand sh -c "+cmd);
-    // Wine starts non-PE (Unix) executables natively, same mechanism the
-    // launcher's cross-prefix attach helper relies on.
-    STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
-    std::wstring shCmd=L"\"Z:\\bin\\sh\" -c \""+escaped+L"\"";
-    bool started=CreateProcessW(L"Z:\\bin\\sh",shCmd.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi);
-    auto result=started?INT_PTR(1):0;
-    if(started){CloseHandle(pi.hThread);CloseHandle(pi.hProcess);}
-    else {
-      log(L"startViaCommand CreateProcessW err="+std::to_wstring(GetLastError()));
-      std::wstring params=L"-c \""+escaped+L"\"";
-      result=(INT_PTR)ShellExecuteW(nullptr,L"open",L"Z:\\bin\\sh",params.c_str(),nullptr,SW_HIDE);
-    }
-    log(L"startViaCommand result="+std::to_wstring(result));
-    return result>32;
+    log(L"startViaCommand "+cmd);
+    bool ok=THPrac::NativeBundle::RunUnixCommand(cmd.c_str(),L"async",0);
+    log(L"startViaCommand result="+std::to_wstring(ok?1:0));
+    return ok;
 }
 bool isProtonContainer() {
     for (const wchar_t* name : { L"STEAM_COMPAT_DATA_PATH", L"STEAM_COMPAT_CLIENT_INSTALL_PATH",
@@ -308,32 +295,18 @@ bool isProtonContainer() {
 }
 
 bool launchSteamGame() {
-    STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
+    using THPrac::NativeBundle::RunUnixCommand;
     if (isProtonContainer()) {
         const wchar_t* attempts[] = {
-            L"\"Z:\\bin\\sh\" -c \"steam-runtime-launch-client --alongside-steam -- steam steam://rungameid/4659620\"",
-            L"\"Z:\\bin\\sh\" -c \"steam-runtime-launch-client --alongside-steam -- xdg-open 'steam://rungameid/4659620'\"",
-            L"\"Z:\\bin\\sh\" -c \"xdg-open 'steam://rungameid/4659620'\"",
+            L"steam-runtime-launch-client --alongside-steam -- steam steam://rungameid/4659620",
+            L"steam-runtime-launch-client --alongside-steam -- xdg-open 'steam://rungameid/4659620'",
+            L"xdg-open 'steam://rungameid/4659620'",
         };
-        for (const wchar_t* att : attempts) {
-            std::wstring cmd = att;
-            if (CreateProcessW(L"Z:\\bin\\sh", cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-                return true;
-            }
-        }
+        for (auto cmd : attempts) if (RunUnixCommand(cmd, L"try", 5000)) return true;
     }
-    std::wstring shCmd=L"\"Z:\\bin\\sh\" -c \"steam steam://rungameid/4659620\"";
-    if(CreateProcessW(L"Z:\\bin\\sh",shCmd.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)) {
-        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-        return true;
-    }
-    if((INT_PTR)ShellExecuteW(nullptr,L"open",L"Z:\\bin\\sh",L"-c \"steam steam://rungameid/4659620\"",nullptr,SW_HIDE)>32) {
-        return true;
-    }
+    if (RunUnixCommand(L"steam steam://rungameid/4659620", L"try", 5000)) return true;
     return (INT_PTR)ShellExecuteW(nullptr,L"open",L"steam://rungameid/4659620",nullptr,nullptr,SW_SHOWNORMAL)>32;
-}
-}
+}}
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,LPWSTR,int) {
  int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);DWORD pid=0;bool launch=false;
  LaunchOptions options;
